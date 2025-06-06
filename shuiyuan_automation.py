@@ -78,7 +78,38 @@ class DiscourseAutomation:
             ]
         )
         self.logger = logging.getLogger(__name__)
-        
+
+    def find_fixed_chromedriver(self):
+        """查找修复脚本安装的ChromeDriver"""
+        try:
+            wdm_cache_dir = os.path.join(os.path.expanduser("~"), ".wdm", "drivers", "chromedriver", "win64")
+            if not os.path.exists(wdm_cache_dir):
+                return None
+
+            # 查找最新版本的ChromeDriver
+            versions = []
+            for version_dir in os.listdir(wdm_cache_dir):
+                version_path = os.path.join(wdm_cache_dir, version_dir)
+                if os.path.isdir(version_path):
+                    # 查找chromedriver.exe
+                    for root, dirs, files in os.walk(version_path):
+                        for file in files:
+                            if file == 'chromedriver.exe':
+                                exe_path = os.path.join(root, file)
+                                if os.path.exists(exe_path):
+                                    versions.append((version_dir, exe_path))
+                                    break
+
+            if versions:
+                # 按版本号排序，使用最新的
+                versions.sort(key=lambda x: x[0], reverse=True)
+                return versions[0][1]
+
+        except Exception as e:
+            self.logger.debug(f"查找修复的ChromeDriver失败: {e}")
+
+        return None
+
     def setup_driver(self):
         """设置Chrome浏览器驱动，配置用户数据目录以保存登录状态"""
         chrome_options = Options()
@@ -116,9 +147,40 @@ class DiscourseAutomation:
                 chrome_options.binary_location = chrome_path
                 self.logger.info(f"使用Chrome路径: {chrome_path}")
 
-            # 自动下载并设置ChromeDriver
-            service = Service(ChromeDriverManager().install())
-            self.driver = webdriver.Chrome(service=service, options=chrome_options)
+            # 自动下载并设置ChromeDriver - 添加重试机制
+            try:
+                # 首先尝试查找已修复的ChromeDriver
+                fixed_driver_path = self.find_fixed_chromedriver()
+                if fixed_driver_path:
+                    self.logger.info(f"使用修复的ChromeDriver: {fixed_driver_path}")
+                    service = Service(fixed_driver_path)
+                    self.driver = webdriver.Chrome(service=service, options=chrome_options)
+                else:
+                    # 尝试使用WebDriver Manager
+                    driver_path = ChromeDriverManager().install()
+                    self.logger.info(f"WebDriver Manager路径: {driver_path}")
+
+                    # 修复WebDriver Manager的路径问题
+                    if not driver_path.endswith('.exe'):
+                        # 查找实际的chromedriver.exe文件
+                        driver_dir = os.path.dirname(driver_path)
+                        for file in os.listdir(driver_dir):
+                            if file == 'chromedriver.exe':
+                                driver_path = os.path.join(driver_dir, file)
+                                break
+
+                    # 验证ChromeDriver是否可执行
+                    if not os.path.exists(driver_path):
+                        raise Exception(f"ChromeDriver文件不存在: {driver_path}")
+
+                    self.logger.info(f"使用ChromeDriver路径: {driver_path}")
+                    service = Service(driver_path)
+                    self.driver = webdriver.Chrome(service=service, options=chrome_options)
+
+            except Exception as driver_error:
+                self.logger.warning(f"ChromeDriver启动失败: {driver_error}")
+                self.logger.info("请运行 python fix_chromedriver.py 来修复ChromeDriver问题")
+                raise
 
             # 执行脚本以隐藏webdriver属性
             self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
