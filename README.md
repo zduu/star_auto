@@ -4,6 +4,7 @@
 
 ## 功能特性
 
+- ✅ **跨平台支持** - 完全兼容Mac、Windows和Linux平台
 - ✅ **多网站支持** - 支持配置多个Discourse网站
 - ✅ **有头/无头模式** - 可选择显示浏览器界面或后台运行
 - ✅ **智能登录管理** - 手动登录后自动保存登录状态
@@ -11,6 +12,7 @@
 - ✅ **双模式浏览** - 支持随机浏览模式和直接链接模式
   - **随机浏览模式** - 随机选择主页帖子进行浏览
   - **直接链接模式** - 直接输入主楼链接进行浏览和点赞
+- ✅ **智能动态加载** - 自动等待页面动态内容加载，适应超长帖子
 - ✅ **智能点赞系统** - 滚动过程中对所有可见帖子进行点赞，支持开关控制
 - ✅ **真实用户模拟** - 模拟真实用户滚动浏览所有回复
 - ✅ **完整的日志记录** - 详细的操作日志和错误追踪
@@ -26,29 +28,42 @@ pip install -r requirements.txt
 
 ### 快速开始
 
-1. **使用启动器（推荐）**：
+#### Windows用户
+1. **双击启动**：双击 `start.bat` 文件
+2. **命令行启动**：
+   ```cmd
+   python start.py
+   ```
+
+#### Mac/Linux用户
+1. **脚本启动**：
+   ```bash
+   ./start.sh
+   ```
+2. **命令行启动**：
    ```bash
    python start.py
    ```
 
-2. **管理网站配置**：
+#### 其他功能
+1. **管理网站配置**：
    ```bash
    python manage_sites.py
    ```
 
-3. **直接运行主脚本**：
+2. **直接运行主脚本**：
    ```bash
    python shuiyuan_automation.py
    ```
 
-4. **基本功能测试**：
+3. **平台兼容性测试**：
    ```bash
-   python test_basic.py
+   python test_platform.py
    ```
 
-5. **点赞逻辑测试**：
+4. **动态加载测试**：
    ```bash
-   python test_like_logic.py
+   python test_dynamic_loading.py
    ```
 
 ### 详细步骤
@@ -162,21 +177,55 @@ pip install -r requirements.txt
 
 ## 文件说明
 
+### 核心文件
 - `shuiyuan_automation.py` - 主要的自动化脚本
 - `start.py` - 用户友好的启动器脚本
+- `platform_utils.py` - 平台兼容性工具模块
 - `manage_sites.py` - 网站配置管理工具
-- `test_basic.py` - 基本功能测试脚本
-- `test_like_logic.py` - 点赞逻辑专项测试脚本
 - `sites_config.json` - 网站配置文件
 - `requirements.txt` - Python依赖包列表
+
+### 启动脚本
+- `start.bat` - Windows批处理启动脚本
+- `start.sh` - Mac/Linux Shell启动脚本
+
+### 测试文件
+- `test_platform.py` - 平台兼容性测试脚本
+- `test_dynamic_loading.py` - 动态加载功能测试脚本
+- `test_fix.py` - 修复验证测试脚本
+
+### 运行时生成
+- `*_automation.log` - 各网站的运行日志文件
+- `chrome_user_data_*/` - 各网站的Chrome用户数据目录
+
+### 文档
 - `README.md` - 使用说明文档
-- `*_automation.log` - 各网站的运行日志文件（运行后生成）
-- `chrome_user_data_*/` - 各网站的Chrome用户数据目录（自动创建）
+
+## 平台兼容性
+
+### 支持的操作系统
+- ✅ **Windows** (Windows 10/11)
+- ✅ **macOS** (macOS 10.14+)
+- ✅ **Linux** (Ubuntu, CentOS, Debian等)
+
+### 平台特定功能
+- **自动Chrome路径检测** - 自动找到不同平台的Chrome安装路径
+- **平台特定Chrome选项** - 针对不同平台优化的浏览器选项
+- **安全文件名处理** - 自动处理不同平台的文件名限制
+- **用户数据目录管理** - 跨平台的用户数据存储
+- **依赖检查** - 平台特定的依赖和环境检查
+
+### 启动方式
+- **Windows**: 双击 `start.bat` 或使用命令行
+- **Mac/Linux**: 运行 `./start.sh` 或使用命令行
+- **通用**: `python start.py` 在所有平台都可用
 
 ## 技术实现
 
 - **Selenium WebDriver** - 浏览器自动化
 - **Chrome WebDriver** - Chrome浏览器驱动
 - **webdriver-manager** - 自动管理ChromeDriver版本
+- **平台检测** - 自动检测操作系统并适配
 - **随机化策略** - 模拟真实用户行为
 - **持久化登录** - 使用Chrome用户数据目录
+- **动态加载处理** - 智能等待页面内容加载

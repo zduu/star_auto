@@ -18,6 +18,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import NoSuchElementException, ElementClickInterceptedException
 from webdriver_manager.chrome import ChromeDriverManager
+from platform_utils import get_platform_utils
 
 class DiscourseAutomation:
     def __init__(self, site_config=None, headless=False, enable_like=True):
@@ -26,6 +27,9 @@ class DiscourseAutomation:
         self.headless = headless
         self.enable_like = enable_like  # 点赞开关
         self.clicked_positions = set()  # 记录已点击过的按钮位置
+
+        # 初始化平台工具
+        self.platform_utils = get_platform_utils()
 
         # 默认网站配置
         self.default_sites = {
@@ -62,13 +66,14 @@ class DiscourseAutomation:
         self.base_url = self.site_config["base_url"]
         self.login_url = self.site_config.get("login_url", "")
 
-        # 设置日志
-        log_filename = f'{self.site_config.get("name", "discourse").replace(" ", "_").lower()}_automation.log'
+        # 设置日志（使用平台工具）
+        site_name = self.site_config.get("name", "discourse")
+        log_filename = self.platform_utils.get_log_filename(site_name)
         logging.basicConfig(
             level=logging.INFO,
             format='%(asctime)s - %(levelname)s - %(message)s',
             handlers=[
-                logging.FileHandler(log_filename),
+                logging.FileHandler(log_filename, encoding='utf-8'),
                 logging.StreamHandler()
             ]
         )
@@ -78,9 +83,12 @@ class DiscourseAutomation:
         """设置Chrome浏览器驱动，配置用户数据目录以保存登录状态"""
         chrome_options = Options()
 
-        # 设置用户数据目录以保存登录状态
-        user_data_dir = os.path.join(os.getcwd(), self.site_config.get("user_data_dir", "chrome_user_data"))
+        # 使用平台工具获取用户数据目录
+        site_name = self.site_config.get("name", "discourse")
+        user_data_dir = self.platform_utils.get_user_data_dir(site_name)
         chrome_options.add_argument(f"--user-data-dir={user_data_dir}")
+
+        self.logger.info(f"用户数据目录: {user_data_dir}")
 
         # 有头/无头模式设置
         if self.headless:
@@ -89,20 +97,25 @@ class DiscourseAutomation:
         else:
             self.logger.info("启动有头模式")
 
+        # 添加平台特定的Chrome选项
+        platform_options = self.platform_utils.get_chrome_options_for_platform()
+        for option in platform_options:
+            chrome_options.add_argument(option)
+
         # 其他Chrome选项
-        chrome_options.add_argument("--no-sandbox")
-        chrome_options.add_argument("--disable-dev-shm-usage")
-        chrome_options.add_argument("--disable-blink-features=AutomationControlled")
         chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
         chrome_options.add_experimental_option('useAutomationExtension', False)
-
-        # 设置窗口大小
-        chrome_options.add_argument("--window-size=1920,1080")
 
         # 禁用图片加载以提高速度（可选）
         # chrome_options.add_argument("--disable-images")
 
         try:
+            # 检查是否有自定义Chrome路径
+            chrome_path = self.platform_utils.get_chrome_executable_path()
+            if chrome_path:
+                chrome_options.binary_location = chrome_path
+                self.logger.info(f"使用Chrome路径: {chrome_path}")
+
             # 自动下载并设置ChromeDriver
             service = Service(ChromeDriverManager().install())
             self.driver = webdriver.Chrome(service=service, options=chrome_options)
@@ -112,10 +125,12 @@ class DiscourseAutomation:
 
             self.wait = WebDriverWait(self.driver, 10)
             mode_text = "无头模式" if self.headless else "有头模式"
-            self.logger.info(f"Chrome浏览器启动成功 ({mode_text})")
+            system_info = self.platform_utils.get_system_info()
+            self.logger.info(f"Chrome浏览器启动成功 ({mode_text}) - {system_info['system'].title()}")
 
         except Exception as e:
             self.logger.error(f"启动浏览器失败: {e}")
+            self.logger.error("请确保已安装Chrome浏览器")
             raise
     
     def check_login_status(self):

@@ -8,6 +8,7 @@ import sys
 import subprocess
 import json
 import os
+from platform_utils import get_platform_utils
 
 def check_dependencies():
     """检查依赖是否已安装"""
@@ -82,9 +83,26 @@ def main():
     print("=" * 60)
     print()
 
-    # 检查依赖
+    # 初始化平台工具并显示系统信息
+    platform_utils = get_platform_utils()
+    platform_utils.print_system_info()
+    print()
+
+    # 检查平台特定的依赖问题
+    platform_issues = platform_utils.check_dependencies()
+    if platform_issues:
+        print("⚠️  平台兼容性问题:")
+        for issue in platform_issues:
+            print(f"   - {issue}")
+
+        continue_anyway = input("是否继续运行？(y/n): ").strip().lower()
+        if continue_anyway not in ['y', 'yes']:
+            return
+        print()
+
+    # 检查Python依赖
     if not check_dependencies():
-        print("⚠️  检测到缺少依赖包")
+        print("⚠️  检测到缺少Python依赖包")
         install = input("是否自动安装依赖包？(y/n): ").strip().lower()
         if install in ['y', 'yes', '']:
             if not install_dependencies():
