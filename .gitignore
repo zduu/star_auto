@@ -1,0 +1,7 @@
+linux.do_automation.log
+上海交大水源社区_automation.log
+chrome_user_data_discourse/
+chrome_user_data_shuiyuan/
+__pycache__/
+.DS_Store
+**/.DS_Store
