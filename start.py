@@ -169,12 +169,19 @@ def main():
     else:
         enable_like = like_input in ['y', 'yes']
 
+    # 如果是直接链接模式，询问是否保持浏览器开启
+    keep_browser_open = False
+    if mode == 'direct_link':
+        keep_input = input("浏览完成后是否保持浏览器开启？(y/n，默认n): ").strip().lower()
+        keep_browser_open = keep_input in ['y', 'yes']
+
     print(f"📋 配置信息:")
     print(f"   - 网站: {selected_site['name'] if selected_site else '默认(水源社区)'}")
     print(f"   - URL: {selected_site['base_url'] if selected_site else 'https://shuiyuan.sjtu.edu.cn'}")
     print(f"   - 运行模式: {'直接链接模式' if mode == 'direct_link' else '随机浏览模式'}")
     if mode == 'direct_link':
         print(f"   - 目标链接: {direct_url}")
+        print(f"   - 保持浏览器: {'是' if keep_browser_open else '否'}")
     else:
         print(f"   - 循环次数: {cycles}")
     print(f"   - 浏览器模式: {'无头模式' if headless else '有头模式'}")

@@ -382,36 +382,76 @@ class DiscourseAutomation:
         except Exception:
             return False
 
+    def wait_for_dynamic_loading(self, timeout=10):
+        """等待动态内容加载完成"""
+        start_time = time.time()
+        last_height = self.driver.execute_script("return document.body.scrollHeight")
+
+        while time.time() - start_time < timeout:
+            time.sleep(1)
+            new_height = self.driver.execute_script("return document.body.scrollHeight")
+
+            if new_height != last_height:
+                self.logger.debug(f"检测到内容加载: {last_height}px -> {new_height}px")
+                last_height = new_height
+                start_time = time.time()  # 重置计时器
+
+        return last_height
+
     def scroll_and_read_replies(self):
         """滚动浏览所有回复，并在滚动过程中进行点赞"""
         try:
             self.logger.info("开始浏览回复...")
 
-            # 获取页面初始高度
-            last_height = self.driver.execute_script("return document.body.scrollHeight")
-
             # 滚动到页面顶部
             self.driver.execute_script("window.scrollTo(0, 0);")
             time.sleep(2)
+
+            # 获取页面初始高度和视窗高度
+            last_height = self.driver.execute_script("return document.body.scrollHeight")
+            viewport_height = self.driver.execute_script("return window.innerHeight")
+
+            self.logger.info(f"页面初始高度: {last_height}px, 视窗高度: {viewport_height}px")
 
             # 先对顶部可见的帖子进行点赞
             if self.enable_like:
                 self.like_visible_posts()
 
-            # 逐步滚动浏览
-            scroll_step = 400  # 增加滚动步长，确保能看到更多内容
-            current_position = 0
+            # 改进的滚动逻辑
+            scroll_step = max(600, viewport_height // 3)  # 减小滚动步长，确保不会跳过太多内容
             total_liked = 0
             scroll_count = 0
+            no_change_count = 0  # 连续无变化的次数
+            last_scroll_position = 0
+            stable_height_count = 0  # 页面高度稳定的次数
 
             while True:
-                # 向下滚动一步
-                current_position += scroll_step
-                self.driver.execute_script(f"window.scrollTo(0, {current_position});")
+                # 获取当前滚动位置和页面高度
+                current_scroll_position = self.driver.execute_script("return window.pageYOffset")
+                current_height = self.driver.execute_script("return document.body.scrollHeight")
+
+                # 向下滚动
+                self.driver.execute_script(f"window.scrollBy(0, {scroll_step});")
                 scroll_count += 1
 
                 # 等待页面稳定
                 time.sleep(random.uniform(1.5, 2.5))
+
+                # 获取新的滚动位置和页面高度
+                new_scroll_position = self.driver.execute_script("return window.pageYOffset")
+                new_height = self.driver.execute_script("return document.body.scrollHeight")
+                current_bottom = new_scroll_position + viewport_height
+
+                self.logger.debug(f"滚动 {scroll_count}: 位置 {new_scroll_position}px, 页面高度 {new_height}px, 底部位置 {current_bottom}px")
+
+                # 检查是否接近底部，如果是则等待动态加载
+                distance_to_bottom = new_height - current_bottom
+                if distance_to_bottom < viewport_height * 2:  # 距离底部不到2个屏幕高度
+                    self.logger.info(f"接近底部，等待动态加载... (距离底部: {distance_to_bottom}px)")
+                    loaded_height = self.wait_for_dynamic_loading(timeout=8)
+                    if loaded_height > new_height:
+                        new_height = loaded_height
+                        self.logger.info(f"动态加载完成，新页面高度: {new_height}px")
 
                 # 每次滚动后对新出现的帖子进行点赞
                 if self.enable_like:
@@ -423,25 +463,56 @@ class DiscourseAutomation:
                         time.sleep(random.uniform(1, 2))
 
                 # 模拟真实阅读停留
-                time.sleep(random.uniform(1, 3))
+                time.sleep(random.uniform(1, 2))
 
-                # 检查是否到达页面底部
-                new_height = self.driver.execute_script("return document.body.scrollHeight")
-                current_scroll_position = self.driver.execute_script("return window.pageYOffset + window.innerHeight")
+                # 检查是否真的滚动了
+                if new_scroll_position == last_scroll_position:
+                    no_change_count += 1
+                    self.logger.debug(f"滚动位置无变化，连续次数: {no_change_count}")
+                else:
+                    no_change_count = 0
+                    last_scroll_position = new_scroll_position
 
-                if current_scroll_position >= new_height - 100:
-                    self.logger.info("已滚动到页面底部")
-                    break
-
-                # 如果页面高度发生变化（可能是动态加载），更新高度
-                if new_height != last_height:
+                # 检查页面高度是否稳定
+                if new_height == last_height:
+                    stable_height_count += 1
+                else:
+                    stable_height_count = 0
                     last_height = new_height
-                    self.logger.info("检测到页面动态加载，继续滚动...")
+                    self.logger.info(f"页面高度变化: {last_height}px -> {new_height}px")
 
-                # 防止无限滚动，设置最大滚动次数
-                if scroll_count > 100:
-                    self.logger.warning("达到最大滚动次数，停止滚动")
+                # 更严格的底部检测逻辑
+                really_at_bottom = (
+                    current_bottom >= new_height - 20 and  # 距离底部很近
+                    stable_height_count >= 3 and  # 页面高度已经稳定
+                    no_change_count >= 2  # 滚动位置也稳定
+                )
+
+                if really_at_bottom:
+                    self.logger.info(f"确认到达页面底部 (位置: {new_scroll_position}px, 页面高度: {new_height}px)")
+                    self.logger.info(f"页面高度稳定次数: {stable_height_count}, 滚动位置稳定次数: {no_change_count}")
                     break
+
+                # 如果连续多次滚动位置都没有变化，但页面高度还在变化，继续等待
+                if no_change_count >= 5 and stable_height_count < 2:
+                    self.logger.info("滚动位置无变化但页面可能还在加载，继续等待...")
+                    time.sleep(3)
+                    continue
+
+                # 如果连续多次滚动位置都没有变化且页面高度稳定，可能真的到底了
+                if no_change_count >= 5 and stable_height_count >= 3:
+                    self.logger.info(f"连续{no_change_count}次滚动位置无变化且页面高度稳定，确认到达底部")
+                    break
+
+                # 防止无限滚动，但增加更大的限制
+                if scroll_count > 500:  # 大幅增加到500次，适应超长帖子
+                    self.logger.warning(f"达到最大滚动次数({scroll_count})，停止滚动")
+                    break
+
+            # 最后再次尝试滚动到底部并等待加载
+            self.logger.info("执行最终底部检查...")
+            self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            final_loaded_height = self.wait_for_dynamic_loading(timeout=5)
 
             # 在底部再次检查是否有遗漏的点赞
             if self.enable_like:
@@ -451,10 +522,15 @@ class DiscourseAutomation:
             # 在底部停留一会儿
             time.sleep(random.uniform(2, 4))
 
+            final_height = self.driver.execute_script("return document.body.scrollHeight")
+            final_position = self.driver.execute_script("return window.pageYOffset")
+
             if self.enable_like:
-                self.logger.info(f"浏览完成，总共点赞 {total_liked} 个帖子")
+                self.logger.info(f"浏览完成，总共滚动 {scroll_count} 次，点赞 {total_liked} 个帖子")
             else:
-                self.logger.info("浏览完成（点赞功能已关闭）")
+                self.logger.info(f"浏览完成，总共滚动 {scroll_count} 次（点赞功能已关闭）")
+
+            self.logger.info(f"最终页面高度: {final_height}px, 最终滚动位置: {final_position}px")
 
             return True
 
