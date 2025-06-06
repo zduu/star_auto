@@ -486,6 +486,60 @@ class DiscourseAutomation:
             self.logger.error(f"浏览帖子时出错: {e}")
             return False
 
+    def browse_direct_link(self, url):
+        """直接浏览指定链接的帖子"""
+        try:
+            self.logger.info(f"开始浏览指定链接: {url}")
+
+            # 直接访问指定链接
+            self.driver.get(url)
+            time.sleep(3)
+
+            # 等待页面加载
+            self.wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+
+            # 清理点击位置记录
+            self.clicked_positions.clear()
+            self.logger.debug("已清理点击记录")
+
+            # 滚动浏览所有回复（包含点赞逻辑）
+            self.scroll_and_read_replies()
+
+            self.logger.info("指定链接浏览完成")
+            return True
+
+        except Exception as e:
+            self.logger.error(f"浏览指定链接时出错: {e}")
+            return False
+
+    def run_direct_link_mode(self, url):
+        """运行直接链接模式"""
+        try:
+            self.setup_driver()
+
+            # 检查登录状态
+            if not self.check_login_status():
+                if not self.manual_login():
+                    self.logger.error("登录失败，程序退出")
+                    return
+
+            like_status = "启用" if self.enable_like else "禁用"
+            self.logger.info(f"开始直接链接模式浏览，点赞功能：{like_status}")
+            self.logger.info(f"目标链接: {url}")
+
+            # 直接浏览指定链接
+            if self.browse_direct_link(url):
+                self.logger.info("直接链接模式浏览完成")
+            else:
+                self.logger.warning("直接链接模式浏览出现问题")
+
+        except Exception as e:
+            self.logger.error(f"直接链接模式运行出错: {e}")
+        finally:
+            if self.driver:
+                self.driver.quit()
+                self.logger.info("浏览器已关闭")
+
     def run_automation(self, cycles=5):
         """运行自动化流程"""
         try:

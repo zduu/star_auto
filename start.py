@@ -132,6 +132,35 @@ def main():
     else:
         headless = headless_input in ['y', 'yes']
 
+    # 选择运行模式
+    print("📋 运行模式选择:")
+    print("   1. 随机浏览模式 - 随机选择主页帖子进行浏览")
+    print("   2. 直接链接模式 - 直接输入主楼链接进行浏览")
+    print()
+
+    mode_input = input("请选择运行模式 (1/2，默认1): ").strip()
+    if mode_input == '2':
+        mode = 'direct_link'
+        # 获取直接链接
+        direct_url = input("请输入主楼链接: ").strip()
+        if not direct_url:
+            print("❌ 未输入链接，程序退出")
+            return
+
+        # 验证链接是否属于选定的网站
+        base_url = selected_site['base_url'] if selected_site else 'https://shuiyuan.sjtu.edu.cn'
+        if not direct_url.startswith(base_url):
+            print(f"⚠️  警告: 输入的链接不属于选定的网站 ({base_url})")
+            confirm_url = input("是否继续？(y/n): ").strip().lower()
+            if confirm_url not in ['y', 'yes']:
+                print("已取消运行")
+                return
+
+        cycles = 1  # 直接链接模式只需要1个循环
+    else:
+        mode = 'random'
+        direct_url = None
+
     # 选择是否启用点赞
     default_like = config.get("settings", {}).get("default_like", True) if config else True
     like_input = input(f"是否启用点赞功能？(y/n，默认{'y' if default_like else 'n'}): ").strip().lower()
@@ -143,7 +172,11 @@ def main():
     print(f"📋 配置信息:")
     print(f"   - 网站: {selected_site['name'] if selected_site else '默认(水源社区)'}")
     print(f"   - URL: {selected_site['base_url'] if selected_site else 'https://shuiyuan.sjtu.edu.cn'}")
-    print(f"   - 循环次数: {cycles}")
+    print(f"   - 运行模式: {'直接链接模式' if mode == 'direct_link' else '随机浏览模式'}")
+    if mode == 'direct_link':
+        print(f"   - 目标链接: {direct_url}")
+    else:
+        print(f"   - 循环次数: {cycles}")
     print(f"   - 浏览器模式: {'无头模式' if headless else '有头模式'}")
     print(f"   - 点赞功能: {'启用' if enable_like else '禁用'}")
     print(f"   - 登录状态: 自动保存")
@@ -165,7 +198,12 @@ def main():
     try:
         from shuiyuan_automation import DiscourseAutomation
         automation = DiscourseAutomation(site_config=selected_site, headless=headless, enable_like=enable_like)
-        automation.run_automation(cycles)
+
+        if mode == 'direct_link':
+            automation.run_direct_link_mode(direct_url)
+        else:
+            automation.run_automation(cycles)
+
     except KeyboardInterrupt:
         print("\n⏹️  用户中断程序")
     except Exception as e:
