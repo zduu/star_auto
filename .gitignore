@@ -2,6 +2,9 @@ linux.do_automation.log
 上海交大水源社区_automation.log
 chrome_user_data_discourse/
 chrome_user_data_shuiyuan/
+chrome_user_data_linux.do/
+chrome_user_data_水源社区/
+chrome_user_data_test site with spaces/
 __pycache__/
 .DS_Store
 **/.DS_Store
