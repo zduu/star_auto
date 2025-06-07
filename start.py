@@ -15,6 +15,7 @@ def check_dependencies():
     try:
         import selenium  # noqa: F401
         from webdriver_manager.chrome import ChromeDriverManager  # noqa: F401
+        import undetected_chromedriver  # noqa: F401
         return True
     except ImportError:
         return False
@@ -231,9 +232,32 @@ def main():
 
     except KeyboardInterrupt:
         print("\n⏹️  用户中断程序")
+        print("正在清理资源...")
+        try:
+            automation.cleanup()
+        except:
+            pass
     except Exception as e:
         print(f"\n❌ 程序运行出错: {e}")
         print("请查看日志文件获取详细信息")
+        print("正在清理资源...")
+        try:
+            automation.cleanup()
+        except:
+            pass
+    finally:
+        # 确保清理
+        try:
+            if 'automation' in locals():
+                automation.cleanup()
+        except:
+            pass
+
+        print("\n程序已退出")
+
+        # 如果是有头模式，提醒用户检查浏览器
+        if not headless:
+            print("💡 如果浏览器仍然打开，请手动关闭或运行: python cleanup_browsers.py")
 
 if __name__ == "__main__":
     main()

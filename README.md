@@ -6,6 +6,7 @@
 
 - ✅ **跨平台支持** - 完全兼容Mac、Windows和Linux平台
 - ✅ **多网站支持** - 支持配置多个Discourse网站
+- ✅ **Cloudflare绕过** - 使用undetected_chromedriver绕过人机验证
 - ✅ **有头/无头模式** - 可选择显示浏览器界面或后台运行
 - ✅ **智能登录管理** - 手动登录后自动保存登录状态
 - ✅ **登录重定向处理** - 支持复杂的登录流程（如SJTU的jaccount）
@@ -56,15 +57,6 @@ pip install -r requirements.txt
    python shuiyuan_automation.py
    ```
 
-3. **平台兼容性测试**：
-   ```bash
-   python test_platform.py
-   ```
-
-4. **动态加载测试**：
-   ```bash
-   python test_dynamic_loading.py
-   ```
 
 ### 详细步骤
 
@@ -171,9 +163,28 @@ pip install -r requirements.txt
 
 ## 故障排除
 
+### 常见问题
+
 - **登录失败**：清除`chrome_user_data`目录重新登录
 - **找不到元素**：网站可能更新了页面结构，需要更新选择器
 - **Chrome启动失败**：确保系统已安装Chrome浏览器
+
+### 无头模式问题
+- **无头模式找不到帖子**：已优化页面加载等待时间和选择器匹配
+- **动态内容加载**：无头模式会自动等待更长时间以确保内容加载完成
+
+### 浏览器清理问题
+- **程序退出后浏览器未关闭**：已添加信号处理和自动清理机制
+- **手动清理残留进程**：运行 `python cleanup_browsers.py`
+
+### 点赞功能问题
+- **无法自动点赞**：已为linux.do等网站优化选择器配置
+- **调试点赞问题**：启用调试日志查看详细的按钮查找信息
+
+### 测试工具
+- **测试linux.do功能**：`python test_linux_do.py`
+- **清理浏览器进程**：`python cleanup_browsers.py`
+- **快速功能测试**：`python quick_test.py`
 
 ## 文件说明
 
@@ -184,15 +195,6 @@ pip install -r requirements.txt
 - `manage_sites.py` - 网站配置管理工具
 - `sites_config.json` - 网站配置文件
 - `requirements.txt` - Python依赖包列表
-
-### 启动脚本
-- `start.bat` - Windows批处理启动脚本
-- `start.sh` - Mac/Linux Shell启动脚本
-
-### 测试文件
-- `test_platform.py` - 平台兼容性测试脚本
-- `test_dynamic_loading.py` - 动态加载功能测试脚本
-- `test_fix.py` - 修复验证测试脚本
 
 ### 运行时生成
 - `*_automation.log` - 各网站的运行日志文件
@@ -215,17 +217,29 @@ pip install -r requirements.txt
 - **用户数据目录管理** - 跨平台的用户数据存储
 - **依赖检查** - 平台特定的依赖和环境检查
 
-### 启动方式
-- **Windows**: 双击 `start.bat` 或使用命令行
-- **Mac/Linux**: 运行 `./start.sh` 或使用命令行
-- **通用**: `python start.py` 在所有平台都可用
 
 ## 技术实现
 
+- **undetected_chromedriver** - 绕过Cloudflare人机验证的Chrome驱动
 - **Selenium WebDriver** - 浏览器自动化
-- **Chrome WebDriver** - Chrome浏览器驱动
+- **Chrome WebDriver** - Chrome浏览器驱动（备用方案）
 - **webdriver-manager** - 自动管理ChromeDriver版本
 - **平台检测** - 自动检测操作系统并适配
 - **随机化策略** - 模拟真实用户行为
 - **持久化登录** - 使用Chrome用户数据目录
 - **动态加载处理** - 智能等待页面内容加载
+
+## Cloudflare绕过功能
+
+本脚本使用`undetected_chromedriver`来绕过Cloudflare的人机验证：
+
+### 主要特性
+- **自动检测绕过** - 自动处理"Checking your browser"页面
+- **隐藏自动化特征** - 移除webdriver属性和自动化标识
+- **真实浏览器模拟** - 使用真实的Chrome浏览器指纹
+- **智能重试机制** - 如果undetected_chromedriver失败，自动回退到传统方式`
+
+### 注意事项
+- 某些网站可能仍然需要手动验证
+- 建议在首次访问时保持有头模式以观察验证过程
+- 如遇到问题，脚本会自动回退到传统的webdriver方式

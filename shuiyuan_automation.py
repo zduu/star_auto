@@ -10,6 +10,9 @@ import time
 import random
 import logging
 import json
+import signal
+import sys
+import atexit
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
@@ -18,6 +21,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import NoSuchElementException, ElementClickInterceptedException
 from webdriver_manager.chrome import ChromeDriverManager
+import undetected_chromedriver as uc
 from platform_utils import get_platform_utils
 
 class DiscourseAutomation:
@@ -27,9 +31,13 @@ class DiscourseAutomation:
         self.headless = headless
         self.enable_like = enable_like  # 点赞开关
         self.clicked_positions = set()  # 记录已点击过的按钮位置
+        self._cleanup_registered = False
 
         # 初始化平台工具
         self.platform_utils = get_platform_utils()
+
+        # 注册清理函数
+        self._register_cleanup_handlers()
 
         # 默认网站配置
         self.default_sites = {
@@ -79,6 +87,43 @@ class DiscourseAutomation:
         )
         self.logger = logging.getLogger(__name__)
 
+    def _register_cleanup_handlers(self):
+        """注册清理处理函数"""
+        if not self._cleanup_registered:
+            # 注册程序退出时的清理函数
+            atexit.register(self._emergency_cleanup)
+
+            # 注册信号处理函数
+            try:
+                signal.signal(signal.SIGINT, self._signal_handler)
+                signal.signal(signal.SIGTERM, self._signal_handler)
+                if hasattr(signal, 'SIGBREAK'):  # Windows
+                    signal.signal(signal.SIGBREAK, self._signal_handler)
+            except Exception as e:
+                self.logger.debug(f"注册信号处理器失败: {e}")
+
+            self._cleanup_registered = True
+
+    def _signal_handler(self, signum, frame):
+        """信号处理函数"""
+        self.logger.info(f"接收到信号 {signum}，正在清理资源...")
+        try:
+            self.cleanup()
+        except Exception as e:
+            self.logger.error(f"信号处理清理失败: {e}")
+        finally:
+            # 确保程序退出
+            import os
+            os._exit(0)
+
+    def _emergency_cleanup(self):
+        """紧急清理函数"""
+        try:
+            if self.driver:
+                self.driver.quit()
+        except:
+            pass
+
     def find_fixed_chromedriver(self):
         """查找修复脚本安装的ChromeDriver"""
         try:
@@ -111,79 +156,100 @@ class DiscourseAutomation:
         return None
 
     def setup_driver(self):
-        """设置Chrome浏览器驱动，配置用户数据目录以保存登录状态"""
-        chrome_options = Options()
-
+        """设置Chrome浏览器驱动，使用undetected_chromedriver绕过Cloudflare验证"""
         # 使用平台工具获取用户数据目录
         site_name = self.site_config.get("name", "discourse")
         user_data_dir = self.platform_utils.get_user_data_dir(site_name)
-        chrome_options.add_argument(f"--user-data-dir={user_data_dir}")
 
+        self.logger.info(f"用户数据目录: {user_data_dir}")
+        self.logger.info("使用undetected_chromedriver绕过Cloudflare验证")
+
+        # 准备undetected_chromedriver的选项
+        uc_options = uc.ChromeOptions()
+
+        # 基础选项
+        uc_options.add_argument("--no-sandbox")
+        uc_options.add_argument("--disable-dev-shm-usage")
+
+        # 设置用户数据目录
+        uc_options.add_argument(f"--user-data-dir={user_data_dir}")
         self.logger.info(f"用户数据目录: {user_data_dir}")
 
         # 有头/无头模式设置
         if self.headless:
-            chrome_options.add_argument("--headless")
-            self.logger.info("启动无头模式")
+            # 无头模式的特殊配置，专门对抗Cloudflare
+            uc_options.add_argument("--headless=new")  # 使用新的无头模式
+            uc_options.add_argument("--disable-gpu")
+            uc_options.add_argument("--window-size=1920,1080")
+            uc_options.add_argument("--disable-web-security")
+            uc_options.add_argument("--allow-running-insecure-content")
+            uc_options.add_argument("--disable-features=VizDisplayCompositor")
+            # 模拟真实浏览器的用户代理
+            uc_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+            # 添加更多反检测选项
+            uc_options.add_argument("--disable-blink-features=AutomationControlled")
+            uc_options.add_argument("--disable-dev-shm-usage")
+            uc_options.add_argument("--no-first-run")
+            uc_options.add_argument("--no-default-browser-check")
+            uc_options.add_argument("--disable-default-apps")
+            self.logger.info("启动无头模式（Cloudflare优化）")
         else:
             self.logger.info("启动有头模式")
 
-        # 添加平台特定的Chrome选项
-        platform_options = self.platform_utils.get_chrome_options_for_platform()
-        for option in platform_options:
-            chrome_options.add_argument(option)
+        # 最小化的Chrome选项，避免与undetected_chromedriver冲突
+        uc_options.add_argument("--disable-blink-features=AutomationControlled")
+        uc_options.add_argument("--disable-extensions")
+        uc_options.add_argument("--disable-plugins")
 
-        # 其他Chrome选项
-        chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-        chrome_options.add_experimental_option('useAutomationExtension', False)
+        # 注意：undetected_chromedriver会自动处理反检测选项，不需要手动设置
+        # 避免添加可能导致冲突的平台特定选项
 
         # 禁用图片加载以提高速度（可选）
-        # chrome_options.add_argument("--disable-images")
+        # uc_options.add_argument("--disable-images")
 
         try:
             # 检查是否有自定义Chrome路径
             chrome_path = self.platform_utils.get_chrome_executable_path()
             if chrome_path:
-                chrome_options.binary_location = chrome_path
+                uc_options.binary_location = chrome_path
                 self.logger.info(f"使用Chrome路径: {chrome_path}")
 
-            # 自动下载并设置ChromeDriver - 添加重试机制
+            # 使用undetected_chromedriver创建浏览器实例
             try:
-                # 首先尝试查找已修复的ChromeDriver
+                self.logger.info("正在启动undetected_chromedriver...")
+
+                # 简化的启动配置
+                self.driver = uc.Chrome(
+                    options=uc_options,
+                    version_main=None,  # 自动检测Chrome版本
+                    driver_executable_path=None,  # 自动下载ChromeDriver
+                    browser_executable_path=chrome_path if chrome_path else None,
+                    use_subprocess=False,  # 避免子进程问题
+                    log_level=3  # 减少日志输出
+                )
+
+                self.logger.info("使用undetected_chromedriver成功创建浏览器实例")
+
+            except Exception as driver_error:
+                self.logger.warning(f"undetected_chromedriver启动失败: {driver_error}")
+                self.logger.info("尝试使用传统方式启动...")
+
+                # 回退到传统的webdriver方式
                 fixed_driver_path = self.find_fixed_chromedriver()
                 if fixed_driver_path:
                     self.logger.info(f"使用修复的ChromeDriver: {fixed_driver_path}")
                     service = Service(fixed_driver_path)
+                    # 转换uc_options为普通的Options
+                    chrome_options = Options()
+                    for arg in uc_options.arguments:
+                        chrome_options.add_argument(arg)
+                    for key, value in uc_options.experimental_options.items():
+                        chrome_options.add_experimental_option(key, value)
+                    if hasattr(uc_options, 'binary_location') and uc_options.binary_location:
+                        chrome_options.binary_location = uc_options.binary_location
                     self.driver = webdriver.Chrome(service=service, options=chrome_options)
                 else:
-                    # 尝试使用WebDriver Manager
-                    driver_path = ChromeDriverManager().install()
-                    self.logger.info(f"WebDriver Manager路径: {driver_path}")
-
-                    # 修复WebDriver Manager的路径问题
-                    if not driver_path.endswith('.exe'):
-                        # 查找实际的chromedriver.exe文件
-                        driver_dir = os.path.dirname(driver_path)
-                        for file in os.listdir(driver_dir):
-                            if file == 'chromedriver.exe':
-                                driver_path = os.path.join(driver_dir, file)
-                                break
-
-                    # 验证ChromeDriver是否可执行
-                    if not os.path.exists(driver_path):
-                        raise Exception(f"ChromeDriver文件不存在: {driver_path}")
-
-                    self.logger.info(f"使用ChromeDriver路径: {driver_path}")
-                    service = Service(driver_path)
-                    self.driver = webdriver.Chrome(service=service, options=chrome_options)
-
-            except Exception as driver_error:
-                self.logger.warning(f"ChromeDriver启动失败: {driver_error}")
-                self.logger.info("请运行 python fix_chromedriver.py 来修复ChromeDriver问题")
-                raise
-
-            # 执行脚本以隐藏webdriver属性
-            self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+                    raise driver_error
 
             self.wait = WebDriverWait(self.driver, 10)
             mode_text = "无头模式" if self.headless else "有头模式"
@@ -192,7 +258,7 @@ class DiscourseAutomation:
 
         except Exception as e:
             self.logger.error(f"启动浏览器失败: {e}")
-            self.logger.error("请确保已安装Chrome浏览器")
+            self.logger.error("请确保已安装Chrome浏览器和undetected-chromedriver包")
             raise
     
     def check_login_status(self):
@@ -271,7 +337,62 @@ class DiscourseAutomation:
         """从主页随机选择一个帖子"""
         try:
             self.driver.get(self.base_url)
-            time.sleep(3)
+
+            # 无头模式需要更长的等待时间和Cloudflare处理
+            wait_time = 15 if self.headless else 3
+            self.logger.info(f"等待页面加载 {wait_time} 秒...")
+            time.sleep(wait_time)
+
+            # 等待页面完全加载
+            try:
+                self.wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+
+                # 无头模式下的Cloudflare处理
+                if self.headless:
+                    # 检查是否遇到Cloudflare
+                    page_title = self.driver.title
+                    page_source = self.driver.page_source.lower()
+
+                    if ("请稍候" in page_title or "just a moment" in page_source or
+                        "checking your browser" in page_source or "cloudflare" in page_source):
+
+                        self.logger.warning("检测到Cloudflare验证页面，尝试等待通过...")
+
+                        # 等待Cloudflare验证完成
+                        for attempt in range(6):  # 最多等待30秒
+                            time.sleep(5)
+                            new_title = self.driver.title
+                            new_source = self.driver.page_source.lower()
+
+                            if ("请稍候" not in new_title and "just a moment" not in new_source and
+                                "checking your browser" not in new_source):
+                                self.logger.info(f"Cloudflare验证通过，耗时 {(attempt + 1) * 5} 秒")
+                                break
+
+                            self.logger.info(f"等待Cloudflare验证... ({attempt + 1}/6)")
+                        else:
+                            self.logger.warning("Cloudflare验证超时，继续尝试...")
+
+                    # 等待JavaScript执行完成
+                    self.logger.info("等待JavaScript执行完成...")
+                    time.sleep(5)
+
+                    # 检查页面是否真正加载完成
+                    for i in range(3):
+                        ready_state = self.driver.execute_script("return document.readyState")
+                        if ready_state == "complete":
+                            break
+                        self.logger.info(f"页面状态: {ready_state}, 继续等待...")
+                        time.sleep(2)
+
+                    # 滚动页面触发懒加载
+                    self.driver.execute_script("window.scrollTo(0, 500);")
+                    time.sleep(2)
+                    self.driver.execute_script("window.scrollTo(0, 0);")
+                    time.sleep(2)
+
+            except Exception as e:
+                self.logger.warning(f"页面加载检查失败: {e}，继续尝试...")
 
             # 使用配置的帖子选择器
             topic_selectors = self.site_config.get("topic_selectors", [
@@ -281,17 +402,70 @@ class DiscourseAutomation:
             ])
 
             topics = []
-            for selector in topic_selectors:
-                try:
-                    elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
-                    if elements:
-                        topics.extend(elements)
-                        break
-                except:
-                    continue
+            # 尝试多次查找，给动态内容更多时间加载
+            for attempt in range(3):
+                for selector in topic_selectors:
+                    try:
+                        elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
+                        if elements:
+                            topics.extend(elements)
+                            self.logger.info(f"使用选择器 '{selector}' 找到 {len(elements)} 个帖子")
+                            break
+                    except Exception as e:
+                        self.logger.debug(f"选择器 '{selector}' 查找失败: {e}")
+                        continue
+
+                if topics:
+                    break
+
+                # 如果没找到，等待一下再试
+                if attempt < 2:
+                    self.logger.info(f"第 {attempt + 1} 次尝试未找到帖子，等待2秒后重试...")
+                    time.sleep(2)
 
             if not topics:
                 self.logger.warning("未找到帖子链接")
+                # 输出详细调试信息
+                if self.headless:
+                    try:
+                        # 获取页面基本信息
+                        current_url = self.driver.current_url
+                        page_title = self.driver.title
+                        page_source = self.driver.page_source
+
+                        self.logger.info(f"当前URL: {current_url}")
+                        self.logger.info(f"页面标题: {page_title}")
+                        self.logger.info(f"页面源码长度: {len(page_source)} 字符")
+
+                        # 检查是否有Cloudflare或其他拦截
+                        if "cloudflare" in page_source.lower():
+                            self.logger.warning("检测到Cloudflare页面")
+                        if "just a moment" in page_source.lower():
+                            self.logger.warning("检测到'Just a moment'页面")
+                        if "checking your browser" in page_source.lower():
+                            self.logger.warning("检测到浏览器检查页面")
+
+                        # 输出页面源码片段
+                        page_snippet = page_source[:2000]
+                        self.logger.debug(f"页面源码片段: {page_snippet}")
+
+                        # 检查是否有任何链接
+                        all_links = self.driver.find_elements(By.TAG_NAME, "a")
+                        self.logger.info(f"页面中总共有 {len(all_links)} 个链接")
+
+                        # 显示前几个链接的信息
+                        for i, link in enumerate(all_links[:5]):
+                            try:
+                                href = link.get_attribute('href') or ''
+                                text = link.text.strip()[:50]
+                                class_name = link.get_attribute('class') or ''
+                                self.logger.debug(f"链接 {i+1}: href='{href[:50]}', text='{text}', class='{class_name}'")
+                            except:
+                                continue
+
+                    except Exception as debug_error:
+                        self.logger.error(f"调试信息获取失败: {debug_error}")
+
                 return None
 
             # 过滤掉无效的帖子链接
@@ -321,7 +495,7 @@ class DiscourseAutomation:
             return None
     
     def like_visible_posts(self):
-        """对当前可见区域的所有帖子进行点赞 - 简化版本"""
+        """对当前可见区域的所有帖子进行点赞 - 改进版本"""
         if not self.enable_like:
             return 0
 
@@ -338,16 +512,36 @@ class DiscourseAutomation:
                 "button[title*='赞']"
             ])
 
+            self.logger.debug(f"使用点赞选择器: {like_selectors}")
+
             # 收集所有可能的点赞按钮
             all_like_buttons = []
             for selector in like_selectors:
                 try:
                     buttons = self.driver.find_elements(By.CSS_SELECTOR, selector)
-                    all_like_buttons.extend(buttons)
-                except Exception:
+                    if buttons:
+                        self.logger.debug(f"选择器 '{selector}' 找到 {len(buttons)} 个按钮")
+                        all_like_buttons.extend(buttons)
+                except Exception as e:
+                    self.logger.debug(f"选择器 '{selector}' 查找失败: {e}")
                     continue
 
             if not all_like_buttons:
+                self.logger.debug("未找到任何点赞按钮")
+                # 输出页面中的一些按钮信息用于调试
+                try:
+                    all_buttons = self.driver.find_elements(By.TAG_NAME, "button")
+                    self.logger.debug(f"页面中共有 {len(all_buttons)} 个按钮")
+                    for i, btn in enumerate(all_buttons[:5]):  # 只显示前5个
+                        try:
+                            btn_class = btn.get_attribute("class") or ""
+                            btn_title = btn.get_attribute("title") or ""
+                            btn_text = btn.text.strip()[:20]  # 只显示前20个字符
+                            self.logger.debug(f"按钮 {i+1}: class='{btn_class}', title='{btn_title}', text='{btn_text}'")
+                        except:
+                            continue
+                except:
+                    pass
                 return 0
 
             # 过滤出当前可见且可点击的按钮
@@ -745,8 +939,57 @@ class DiscourseAutomation:
     def cleanup(self):
         """清理资源"""
         if self.driver:
-            self.logger.info("关闭浏览器")
-            self.driver.quit()
+            try:
+                self.logger.info("正在关闭浏览器...")
+
+                # 首先尝试正常关闭
+                self.driver.quit()
+                self.logger.info("浏览器已正常关闭")
+
+            except Exception as e:
+                self.logger.warning(f"正常关闭浏览器失败: {e}")
+
+                # 尝试强制关闭
+                try:
+                    self.logger.info("尝试强制关闭浏览器...")
+
+                    # 关闭所有窗口
+                    for handle in self.driver.window_handles:
+                        self.driver.switch_to.window(handle)
+                        self.driver.close()
+
+                    # 退出驱动
+                    self.driver.quit()
+
+                except Exception as force_error:
+                    self.logger.warning(f"强制关闭也失败: {force_error}")
+
+                    # 最后尝试终止进程
+                    try:
+                        if hasattr(self.driver, 'service') and hasattr(self.driver.service, 'process'):
+                            if self.driver.service.process:
+                                self.driver.service.process.terminate()
+                                self.logger.info("已终止浏览器进程")
+                    except Exception as proc_error:
+                        self.logger.warning(f"终止进程失败: {proc_error}")
+
+                        # 最终手段：使用系统命令杀死Chrome进程
+                        try:
+                            import subprocess
+                            import platform
+
+                            system = platform.system().lower()
+                            if system == "windows":
+                                subprocess.run(['taskkill', '/F', '/IM', 'chrome.exe'],
+                                             capture_output=True, check=False)
+                                self.logger.info("已使用taskkill终止Chrome进程")
+
+                        except Exception as sys_error:
+                            self.logger.warning(f"系统命令终止失败: {sys_error}")
+
+            finally:
+                self.driver = None
+                self.logger.info("浏览器清理完成")
 
 def main():
     """主函数"""
