@@ -15,4 +15,5 @@ settings.json
 # Logs / runtime artifacts
 *_automation.log
 chrome_user_data_*/
+.chrome-profiles/
 

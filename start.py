@@ -14,6 +14,48 @@ import platform
 import json
 import argparse
 import subprocess
+import re
+from urllib.parse import urlparse
+
+
+def get_local_chrome_version(chrome_path=None):
+    """Return full Chrome version string like '139.0.7258.128' if detectable.
+    Prefer Windows registry on Windows; otherwise try `chrome --version`.
+    """
+    system = platform.system().lower()
+    # Windows: query registry BLBeacon version first (most reliable)
+    if system == 'windows':
+        try:
+            import winreg  # type: ignore
+            for root in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+                try:
+                    with winreg.OpenKey(root, r"Software\\Google\\Chrome\\BLBeacon") as k:
+                        val, _ = winreg.QueryValueEx(k, "version")
+                        if isinstance(val, str) and val:
+                            return val.strip()
+                except OSError:
+                    pass
+        except Exception:
+            pass
+
+    # Fallback: invoke chrome binary with --version
+    candidates = []
+    if chrome_path and os.path.exists(chrome_path):
+        candidates.append(chrome_path)
+    # Try PATH fallback
+    candidates.append('chrome')
+    candidates.append('google-chrome')
+    for bin_path in candidates:
+        try:
+            out = subprocess.check_output([bin_path, '--version'], stderr=subprocess.STDOUT, timeout=5)
+            s = out.decode(errors='ignore').strip()
+            # Outputs like: "Google Chrome 139.0.7258.128" or "Chromium 119.0..."
+            m = re.search(r"(\d+\.\d+\.\d+\.\d+)", s)
+            if m:
+                return m.group(1)
+        except Exception:
+            continue
+    return None
 
 
 def check_dependencies():
@@ -54,10 +96,17 @@ def get_chrome_executable_path():
     return None
 
 
-def setup_driver(headless=False):
+def setup_driver(headless=False, user_data_dir=None):
     """优先使用 undetected_chromedriver，失败时回退到标准 webdriver"""
     chrome_path = get_chrome_executable_path()
     system = platform.system().lower()
+    chrome_version_full = get_local_chrome_version(chrome_path)
+    chrome_version_major = None
+    try:
+        if chrome_version_full:
+            chrome_version_major = int(chrome_version_full.split('.')[0])
+    except Exception:
+        chrome_version_major = None
 
     # 首选：undetected_chromedriver
     try:
@@ -73,10 +122,17 @@ def setup_driver(headless=False):
             uc_options.add_argument("--headless=new")
         if chrome_path:
             uc_options.binary_location = chrome_path
+        # 持久用户数据目录（复用登录状态）
+        if user_data_dir:
+            uc_options.add_argument(f"--user-data-dir={user_data_dir}")
+            uc_options.add_argument("--profile-directory=Default")
+            uc_options.add_argument("--no-first-run")
+            uc_options.add_argument("--no-default-browser-check")
 
         driver = uc.Chrome(
             options=uc_options,
-            version_main=None,
+            # Pin to detected major version if available to avoid mismatch
+            version_main=chrome_version_major,
             driver_executable_path=None,
             browser_executable_path=chrome_path if chrome_path else None,
             use_subprocess=False,
@@ -103,8 +159,25 @@ def setup_driver(headless=False):
             options.add_argument("--headless=new")
         if chrome_path:
             options.binary_location = chrome_path
+        # 持久用户数据目录（复用登录状态）
+        if user_data_dir:
+            options.add_argument(f"--user-data-dir={user_data_dir}")
+            options.add_argument("--profile-directory=Default")
+            options.add_argument("--no-first-run")
+            options.add_argument("--no-default-browser-check")
 
-        service = Service(ChromeDriverManager().install())
+        # If we detected local Chrome version, request matching driver version
+        try:
+            if chrome_version_major:
+                service = Service(ChromeDriverManager(driver_version=str(chrome_version_major)).install())
+            else:
+                service = Service(ChromeDriverManager().install())
+        except TypeError:
+            # Fallback for older webdriver-manager API (uses 'version' instead of 'driver_version')
+            if chrome_version_major:
+                service = Service(ChromeDriverManager(version=str(chrome_version_major)).install())
+            else:
+                service = Service(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service, options=options)
         return driver
     except Exception as e:
@@ -456,11 +529,24 @@ def main():
     print(f"- 无头: {'是' if headless else '否'}")
     print(f"- 点赞: {'启用' if enable_like else '禁用'}")
 
-    # 启动浏览器
+    # 启动浏览器（按站点使用持久用户数据目录，复用登录状态）
     driver = None
     try:
-        driver = setup_driver(headless=headless)
+        def get_user_data_dir_for_site(site_url: str):
+            try:
+                host = urlparse(site_url).netloc or 'default'
+            except Exception:
+                host = 'default'
+            safe_host = re.sub(r"[^a-zA-Z0-9_.-]", "_", host)
+            root = os.path.join(os.path.abspath(os.getcwd()), ".chrome-profiles")
+            path = os.path.join(root, safe_host)
+            os.makedirs(path, exist_ok=True)
+            return path
+
+        user_data_dir = get_user_data_dir_for_site(base_url)
+        driver = setup_driver(headless=headless, user_data_dir=user_data_dir)
         print("✅ 浏览器已启动")
+        print(f"🔐 使用持久会话目录: {user_data_dir}")
 
         # 登录（如需要）
         ensure_login(driver, base_url)
