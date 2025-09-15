@@ -15,6 +15,10 @@ import json
 import argparse
 import subprocess
 import re
+import atexit
+import signal
+
+from typing import Optional
 from urllib.parse import urlparse
 
 
@@ -186,6 +190,116 @@ def setup_driver(headless=False, user_data_dir=None):
         raise
 
 
+# -----------------------
+# Cross-platform cleanup
+# -----------------------
+_CLEANUP_CTX = {
+    'driver': None,            # type: Optional[object]
+    'user_data_dir': None,     # type: Optional[str]
+    'handlers_installed': False,
+}
+
+
+def _kill_chrome_for_profile(user_data_dir: Optional[str]):
+    if not user_data_dir:
+        return
+    try:
+        import psutil  # type: ignore
+    except Exception:
+        psutil = None
+
+    try:
+        system = platform.system().lower()
+        if psutil:
+            targets = []
+            for p in psutil.process_iter(['pid', 'name', 'cmdline']):
+                try:
+                    name = (p.info.get('name') or '').lower()
+                    cmdline = p.info.get('cmdline') or []
+                    cmd = ' '.join(cmdline)
+                    if ('chrome' in name or 'google chrome' in name) and (user_data_dir in cmd):
+                        targets.append(p)
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+            # Graceful terminate, then kill if needed
+            for p in targets:
+                try:
+                    p.terminate()
+                except Exception:
+                    pass
+            if targets:
+                psutil.wait_procs(targets, timeout=5)
+            for p in targets:
+                try:
+                    if p.is_running():
+                        p.kill()
+                except Exception:
+                    pass
+            # Also try to stop stray chromedriver processes (best effort)
+            for p in psutil.process_iter(['pid', 'name']):
+                try:
+                    name = (p.info.get('name') or '').lower()
+                    if 'chromedriver' in name:
+                        p.terminate()
+                except Exception:
+                    continue
+        else:
+            if system == 'windows':
+                # Best-effort: this may close all Chrome instances
+                subprocess.call(['taskkill', '/F', '/IM', 'chrome.exe'])
+                subprocess.call(['taskkill', '/F', '/IM', 'chromedriver.exe'])
+            else:
+                # Narrow down by profile dir to avoid killing user's real Chrome
+                try:
+                    subprocess.call(['pkill', '-f', f'Google Chrome.*--user-data-dir={user_data_dir}'])
+                except Exception:
+                    # Fallback broad kill (avoid unless necessary)
+                    subprocess.call(['pkill', '-f', 'chromedriver'])
+    except Exception:
+        # Best-effort cleanup; ignore errors
+        pass
+
+
+def _cleanup():
+    drv = _CLEANUP_CTX.get('driver')
+    user_data_dir = _CLEANUP_CTX.get('user_data_dir')
+    # Try closing the webdriver session first
+    try:
+        if drv:
+            try:
+                drv.quit()
+            except Exception:
+                pass
+    finally:
+        # Ensure Chrome for this profile is not left hanging
+        _kill_chrome_for_profile(user_data_dir)
+
+
+def _install_cleanup_handlers():
+    if _CLEANUP_CTX.get('handlers_installed'):
+        return
+    _CLEANUP_CTX['handlers_installed'] = True
+
+    # Run on normal interpreter exit
+    atexit.register(_cleanup)
+
+    # Handle common termination signals so Chrome is closed on macOS/Linux
+    def handler(signum, frame):  # noqa: ARG001
+        try:
+            _cleanup()
+        finally:
+            # Exit immediately to avoid running further code paths
+            os._exit(128 + int(signum))
+
+    for sig_name in ('SIGINT', 'SIGTERM', 'SIGHUP'):
+        if hasattr(signal, sig_name):
+            try:
+                signal.signal(getattr(signal, sig_name), handler)
+            except Exception:
+                # Some environments disallow setting handlers; ignore
+                pass
+
+
 def wait_for_cloudflare(driver, headless=False, max_wait=30):
     # 无头模式下适当等待 Cloudflare 页面
     if not headless:
@@ -250,37 +364,75 @@ def get_random_topic(driver, base_url):
 
 def like_visible_posts(driver):
     from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+
     liked = 0
+
+    # Prefer robust Discourse selectors; fall back to title/aria-label in multiple languages
     selectors = [
-        ".like-button",
-        ".post-controls .like",
-        ".actions .like",
-        "button[title*='like']",
-        "button[title*='赞']",
-        ".widget-button.like",
-        ".post-action-like",
+        ".post-controls button[data-action='like']",
+        "button.toggle-like",
+        ".actions button.like",
+        "button[aria-label*='Like'], button[aria-label*='赞'], button[title*='Like'], button[title*='赞']",
     ]
-    seen = set()
+
+    seen_positions = set()
     for css in selectors:
         try:
-            for btn in driver.find_elements(By.CSS_SELECTOR, css):
-                try:
-                    key = (btn.location.get('x', 0), btn.location.get('y', 0))
-                    if key in seen:
-                        continue
-                    seen.add(key)
-
-                    aria = (btn.get_attribute('aria-pressed') or '').lower()
-                    cls = (btn.get_attribute('class') or '').lower()
-                    if 'liked' in cls or 'has-like' in cls or aria == 'true':
-                        continue
-                    btn.click()
-                    liked += 1
-                    time.sleep(0.2)
-                except Exception:
-                    continue
+            buttons = driver.find_elements(By.CSS_SELECTOR, css)
         except Exception:
-            continue
+            buttons = []
+        for btn in buttons:
+            try:
+                # Only operate on real buttons
+                tag = (btn.tag_name or '').lower()
+                if tag != 'button':
+                    continue
+
+                # De-duplicate by location on screen
+                loc = btn.location or {}
+                key = (int(loc.get('x', 0)), int(loc.get('y', 0)))
+                if key in seen_positions:
+                    continue
+                seen_positions.add(key)
+
+                # Skip if already liked
+                aria = (btn.get_attribute('aria-pressed') or '').lower()
+                cls = (btn.get_attribute('class') or '').lower()
+                if 'liked' in cls or 'has-like' in cls or aria == 'true':
+                    continue
+
+                # Scroll into view and wait until clickable, then click via JS for reliability
+                try:
+                    driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", btn)
+                except Exception:
+                    pass
+                try:
+                    WebDriverWait(driver, 3).until(EC.element_to_be_clickable(btn))
+                except Exception:
+                    pass
+                try:
+                    driver.execute_script("arguments[0].click();", btn)
+                except Exception:
+                    try:
+                        btn.click()
+                    except Exception:
+                        continue
+
+                # Confirm state change; some sites require a short debounce
+                ok = False
+                for _ in range(5):
+                    time.sleep(0.2)
+                    aria2 = (btn.get_attribute('aria-pressed') or '').lower()
+                    cls2 = (btn.get_attribute('class') or '').lower()
+                    if 'liked' in cls2 or 'has-like' in cls2 or aria2 == 'true':
+                        ok = True
+                        break
+                if ok:
+                    liked += 1
+            except Exception:
+                continue
     return liked
 
 
@@ -544,7 +696,13 @@ def main():
             return path
 
         user_data_dir = get_user_data_dir_for_site(base_url)
+        # Install cleanup hooks early with profile information
+        _CLEANUP_CTX['user_data_dir'] = user_data_dir
+        _install_cleanup_handlers()
+
         driver = setup_driver(headless=headless, user_data_dir=user_data_dir)
+        # Make driver available to cleanup hooks
+        _CLEANUP_CTX['driver'] = driver
         print("✅ 浏览器已启动")
         print(f"🔐 使用持久会话目录: {user_data_dir}")
 
@@ -566,6 +724,11 @@ def main():
         try:
             if driver:
                 driver.quit()
+        except Exception:
+            pass
+        # Ensure no stray Chrome remains for this profile (especially on macOS)
+        try:
+            _kill_chrome_for_profile(_CLEANUP_CTX.get('user_data_dir'))
         except Exception:
             pass
         print("\n程序结束")
