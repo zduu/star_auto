@@ -1,4 +1,4 @@
-selenium>=4.10
-undetected-chromedriver>=3.5
-webdriver-manager>=4.0
+selenium>=4.16,<5
+undetected-chromedriver>=3.5.5,<4
+webdriver-manager>=4.0.2,<4.1
 psutil>=5.9

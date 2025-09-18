@@ -10,6 +10,9 @@ import time
 import platform
 import signal
 import glob
+import re
+
+from typing import Optional
 
 # 尝试导入psutil，如果没有则使用基础方法
 try:
@@ -17,6 +20,102 @@ try:
     HAS_PSUTIL = True
 except ImportError:
     HAS_PSUTIL = False
+
+
+def get_local_chrome_version(chrome_path: Optional[str] = None) -> Optional[str]:
+    system = platform.system().lower()
+    if system == 'windows':
+        try:
+            import winreg  # type: ignore
+
+            for root in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+                try:
+                    with winreg.OpenKey(root, r"Software\\Google\\Chrome\\BLBeacon") as key:
+                        val, _ = winreg.QueryValueEx(key, "version")
+                        if isinstance(val, str) and val:
+                            return val.strip()
+                except OSError:
+                    continue
+        except Exception:
+            pass
+
+    candidates = []
+    if chrome_path and os.path.exists(chrome_path):
+        candidates.append(chrome_path)
+    candidates.extend(['chrome', 'google-chrome'])
+
+    for bin_path in candidates:
+        try:
+            out = subprocess.check_output([bin_path, '--version'], stderr=subprocess.STDOUT, timeout=5)
+            text = out.decode(errors='ignore').strip()
+            match = re.search(r"(\d+\.\d+\.\d+\.\d+)", text)
+            if match:
+                return match.group(1)
+        except Exception:
+            continue
+    return None
+
+
+def get_chrome_executable_path() -> Optional[str]:
+    system = platform.system().lower()
+    if system == 'windows':
+        candidates = [
+            r"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+            r"C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+            os.path.expanduser(r"~\\AppData\\Local\\Google\\Chrome\\Application\\chrome.exe"),
+        ]
+    elif system == 'darwin':
+        candidates = [
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            os.path.expanduser("~/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+        ]
+    else:
+        candidates = [
+            "/usr/bin/google-chrome",
+            "/usr/bin/google-chrome-stable",
+            "/usr/bin/chromium",
+            "/usr/bin/chromium-browser",
+            "/snap/bin/chromium",
+        ]
+    for candidate in candidates:
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
+def install_matching_chromedriver(chrome_version_full: Optional[str], chrome_version_major: Optional[int]) -> str:
+    try:
+        from webdriver_manager.chrome import ChromeDriverManager
+    except Exception as exc:
+        raise RuntimeError("webdriver_manager 未安装或不可用") from exc
+
+    candidates = []
+    if chrome_version_full:
+        candidates.append(str(chrome_version_full))
+    if chrome_version_major is not None:
+        candidates.append(str(chrome_version_major))
+    candidates.append(None)
+
+    last_error = None
+    for candidate in candidates:
+        if candidate is None:
+            try:
+                return ChromeDriverManager().install()
+            except Exception as exc:
+                last_error = exc
+                continue
+        for key in ('driver_version', 'version'):
+            kwargs = {key: candidate}
+            try:
+                return ChromeDriverManager(**kwargs).install()
+            except TypeError:
+                continue
+            except Exception as exc:
+                last_error = exc
+                break
+    if last_error:
+        raise last_error
+    raise RuntimeError("无法自动安装匹配的 ChromeDriver")
 
 def cleanup_undetected_chromedriver():
     """清理undetected_chromedriver缓存"""
@@ -147,6 +246,15 @@ def test_simple_chrome():
         system = platform.system().lower()
         options = uc.ChromeOptions()
 
+        chrome_path = get_chrome_executable_path()
+        chrome_version_full = get_local_chrome_version(chrome_path)
+        chrome_version_major = None
+        try:
+            if chrome_version_full:
+                chrome_version_major = int(chrome_version_full.split('.')[0])
+        except Exception:
+            chrome_version_major = None
+
         # 基础选项
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
@@ -173,7 +281,8 @@ def test_simple_chrome():
                     options=options,
                     use_subprocess=False,
                     log_level=3,
-                    version_main=None,
+                    version_main=chrome_version_major,
+                    browser_executable_path=chrome_path if chrome_path else None,
                     driver_executable_path=None
                 )
                 result_queue.put(('success', driver))
@@ -237,7 +346,6 @@ def test_standard_chrome():
         from selenium import webdriver
         from selenium.webdriver.chrome.service import Service
         from selenium.webdriver.chrome.options import Options
-        from webdriver_manager.chrome import ChromeDriverManager
 
         print("正在使用标准webdriver测试...")
 
@@ -246,7 +354,19 @@ def test_standard_chrome():
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--headless")  # 使用无头模式避免卡住
 
-        service = Service(ChromeDriverManager().install())
+        chrome_path = get_chrome_executable_path()
+        if chrome_path:
+            options.binary_location = chrome_path
+        chrome_version_full = get_local_chrome_version(chrome_path)
+        chrome_version_major = None
+        try:
+            if chrome_version_full:
+                chrome_version_major = int(chrome_version_full.split('.')[0])
+        except Exception:
+            chrome_version_major = None
+
+        driver_path = install_matching_chromedriver(chrome_version_full, chrome_version_major)
+        service = Service(driver_path)
         driver = webdriver.Chrome(service=service, options=options)
 
         print("✅ 标准Chrome启动成功")

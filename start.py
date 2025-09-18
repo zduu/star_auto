@@ -21,6 +21,87 @@ import signal
 from typing import Optional
 from urllib.parse import urlparse
 
+DEFAULT_RATE_CONFIG = {
+    'scroll_delay_min': 0.6,
+    'scroll_delay_max': 1.4,
+    'like_delay_min': 1.0,
+    'like_delay_max': 2.5,
+    'topic_delay_min': 3.0,
+    'topic_delay_max': 6.0,
+}
+
+
+def normalize_rate_config(raw):
+    """Convert arbitrary dict-like input into a sanitized rate configuration."""
+    config = dict(DEFAULT_RATE_CONFIG)
+    if isinstance(raw, dict):
+        for key in DEFAULT_RATE_CONFIG:
+            if key in raw:
+                try:
+                    config[key] = max(0.0, float(raw[key]))
+                except Exception:
+                    pass
+    for prefix in ('scroll', 'like', 'topic'):
+        min_key = f'{prefix}_delay_min'
+        max_key = f'{prefix}_delay_max'
+        if config[max_key] < config[min_key]:
+            config[max_key] = config[min_key]
+    return config
+
+
+def apply_delay(rate_config, kind):
+    if not rate_config:
+        return
+    min_key = f'{kind}_delay_min'
+    max_key = f'{kind}_delay_max'
+    min_delay = rate_config.get(min_key, 0.0)
+    max_delay = rate_config.get(max_key, min_delay)
+    if min_delay < 0:
+        min_delay = 0.0
+    if max_delay < min_delay:
+        max_delay = min_delay
+    if max_delay <= 0:
+        return
+    try:
+        time.sleep(random.uniform(min_delay, max_delay))
+    except Exception:
+        pass
+
+
+def install_matching_chromedriver(chrome_version_full: Optional[str], chrome_version_major: Optional[int]):
+    try:
+        from webdriver_manager.chrome import ChromeDriverManager
+    except Exception as exc:
+        raise RuntimeError("webdriver_manager 未安装或不可用") from exc
+
+    candidates = []
+    if chrome_version_full:
+        candidates.append(str(chrome_version_full))
+    if chrome_version_major is not None:
+        candidates.append(str(chrome_version_major))
+    candidates.append(None)
+
+    last_error = None
+    for candidate in candidates:
+        if candidate is None:
+            try:
+                return ChromeDriverManager().install()
+            except Exception as exc:
+                last_error = exc
+                continue
+        for key in ('driver_version', 'version'):
+            kwargs = {key: candidate}
+            try:
+                return ChromeDriverManager(**kwargs).install()
+            except TypeError:
+                continue
+            except Exception as exc:
+                last_error = exc
+                break
+    if last_error:
+        raise last_error
+    raise RuntimeError("无法自动安装匹配的 ChromeDriver")
+
 
 def get_local_chrome_version(chrome_path=None):
     """Return full Chrome version string like '139.0.7258.128' if detectable.
@@ -151,7 +232,6 @@ def setup_driver(headless=False, user_data_dir=None):
         from selenium import webdriver
         from selenium.webdriver.chrome.service import Service
         from selenium.webdriver.chrome.options import Options
-        from webdriver_manager.chrome import ChromeDriverManager
 
         options = Options()
         options.add_argument("--no-sandbox")
@@ -171,17 +251,8 @@ def setup_driver(headless=False, user_data_dir=None):
             options.add_argument("--no-default-browser-check")
 
         # If we detected local Chrome version, request matching driver version
-        try:
-            if chrome_version_major:
-                service = Service(ChromeDriverManager(driver_version=str(chrome_version_major)).install())
-            else:
-                service = Service(ChromeDriverManager().install())
-        except TypeError:
-            # Fallback for older webdriver-manager API (uses 'version' instead of 'driver_version')
-            if chrome_version_major:
-                service = Service(ChromeDriverManager(version=str(chrome_version_major)).install())
-            else:
-                service = Service(ChromeDriverManager().install())
+        driver_path = install_matching_chromedriver(chrome_version_full, chrome_version_major)
+        service = Service(driver_path)
         driver = webdriver.Chrome(service=service, options=options)
         return driver
     except Exception as e:
@@ -197,6 +268,7 @@ _CLEANUP_CTX = {
     'driver': None,            # type: Optional[object]
     'user_data_dir': None,     # type: Optional[str]
     'handlers_installed': False,
+    'win_ctrl_handler': None,
 }
 
 
@@ -299,6 +371,27 @@ def _install_cleanup_handlers():
                 # Some environments disallow setting handlers; ignore
                 pass
 
+    if os.name == 'nt' and _CLEANUP_CTX.get('win_ctrl_handler') is None:
+        try:
+            import ctypes
+
+            HandlerFunc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_uint)
+
+            def console_handler(ctrl_type):
+                if ctrl_type in (0, 1):  # CTRL_C_EVENT / CTRL_BREAK_EVENT
+                    return False
+                try:
+                    _cleanup()
+                finally:
+                    os._exit(0)
+                return True
+
+            handler = HandlerFunc(console_handler)
+            if ctypes.windll.kernel32.SetConsoleCtrlHandler(handler, True):
+                _CLEANUP_CTX['win_ctrl_handler'] = handler
+        except Exception:
+            pass
+
 
 def wait_for_cloudflare(driver, headless=False, max_wait=30):
     # 无头模式下适当等待 Cloudflare 页面
@@ -362,7 +455,7 @@ def get_random_topic(driver, base_url):
     return None
 
 
-def like_visible_posts(driver):
+def like_visible_posts(driver, rate_config=None):
     from selenium.webdriver.common.by import By
     from selenium.webdriver.support.ui import WebDriverWait
     from selenium.webdriver.support import expected_conditions as EC
@@ -431,20 +524,21 @@ def like_visible_posts(driver):
                         break
                 if ok:
                     liked += 1
+                    apply_delay(rate_config, 'like')
             except Exception:
                 continue
     return liked
 
 
-def scroll_and_read(driver, enable_like=False, max_scrolls=200):
+def scroll_and_read(driver, enable_like=False, max_scrolls=200, rate_config=None):
     last_height = 0
     stable = 0
     total_liked = 0
     for i in range(max_scrolls):
         if enable_like:
-            total_liked += like_visible_posts(driver)
+            total_liked += like_visible_posts(driver, rate_config=rate_config)
         driver.execute_script("window.scrollBy(0, 600);")
-        time.sleep(random.uniform(0.6, 1.4))
+        apply_delay(rate_config, 'scroll')
         h = driver.execute_script("return document.body.scrollHeight")
         if h == last_height:
             stable += 1
@@ -480,7 +574,7 @@ def ensure_login(driver, base_url):
         return True
 
 
-def run_random_mode(driver, base_url, cycles, enable_like, headless):
+def run_random_mode(driver, base_url, cycles, enable_like, headless, rate_config=None):
     from selenium.webdriver.common.by import By
     for idx in range(cycles):
         print(f"➡️  循环 {idx + 1}/{cycles}")
@@ -500,19 +594,21 @@ def run_random_mode(driver, base_url, cycles, enable_like, headless):
             if href:
                 driver.get(href)
         time.sleep(2)
-        liked = scroll_and_read(driver, enable_like=enable_like)
+        liked = scroll_and_read(driver, enable_like=enable_like, rate_config=rate_config)
         if enable_like:
             print(f"✅ 已浏览并点赞 {liked} 次")
         else:
             print("✅ 已浏览（未开启点赞）")
+        if idx < cycles - 1:
+            apply_delay(rate_config, 'topic')
 
 
-def run_direct_mode(driver, url, enable_like, headless):
+def run_direct_mode(driver, url, enable_like, headless, rate_config=None):
     print(f"🧭 打开链接: {url}")
     driver.get(url)
     wait_for_cloudflare(driver, headless=headless)
     time.sleep(3)
-    liked = scroll_and_read(driver, enable_like=enable_like)
+    liked = scroll_and_read(driver, enable_like=enable_like, rate_config=rate_config)
     if enable_like:
         print(f"✅ 已浏览并点赞 {liked} 次")
     else:
@@ -599,11 +695,27 @@ def main():
             cyc = cycles_def
         head = ask('默认无头模式? (y/n)', 'n').lower() in ['y', 'yes']
         like = ask('默认启用点赞? (y/n)', 'y').lower() not in ['n', 'no']
+        rate_current = normalize_rate_config(current.get('rate_control'))
+
+        def ask_rate(prompt, key):
+            default_val = str(rate_current.get(key, DEFAULT_RATE_CONFIG[key]))
+            return ask(prompt, default_val)
+
+        raw_rate = {
+            'scroll_delay_min': ask_rate('滚动最小间隔(秒)', 'scroll_delay_min'),
+            'scroll_delay_max': ask_rate('滚动最大间隔(秒)', 'scroll_delay_max'),
+            'like_delay_min': ask_rate('点赞最小间隔(秒)', 'like_delay_min'),
+            'like_delay_max': ask_rate('点赞最大间隔(秒)', 'like_delay_max'),
+            'topic_delay_min': ask_rate('帖子间最小停顿(秒)', 'topic_delay_min'),
+            'topic_delay_max': ask_rate('帖子间最大停顿(秒)', 'topic_delay_max'),
+        }
+        rate_control = normalize_rate_config(raw_rate)
         settings = {
             'base_url': base,
             'default_cycles': max(1, int(cyc)),
             'default_headless': bool(head),
             'default_like': bool(like),
+            'rate_control': rate_control,
         }
         save_settings(settings)
 
@@ -631,6 +743,8 @@ def main():
         enable_like = False
     else:
         enable_like = bool(settings.get('default_like', True))
+
+    rate_config = normalize_rate_config(settings.get('rate_control'))
 
     # 未通过指令指定时，提供模式选择（不需要命令行参数）
     mode = args.mode
@@ -680,6 +794,9 @@ def main():
         print(f"- 循环: {cycles}")
     print(f"- 无头: {'是' if headless else '否'}")
     print(f"- 点赞: {'启用' if enable_like else '禁用'}")
+    print(f"- 滚动间隔: {rate_config['scroll_delay_min']:.2f}-{rate_config['scroll_delay_max']:.2f}s")
+    print(f"- 点赞间隔: {rate_config['like_delay_min']:.2f}-{rate_config['like_delay_max']:.2f}s")
+    print(f"- 帖子间停顿: {rate_config['topic_delay_min']:.2f}-{rate_config['topic_delay_max']:.2f}s")
 
     # 启动浏览器（按站点使用持久用户数据目录，复用登录状态）
     driver = None
@@ -711,9 +828,9 @@ def main():
 
         # 跑模式
         if mode == 'direct':
-            run_direct_mode(driver, direct_url, enable_like, headless)
+            run_direct_mode(driver, direct_url, enable_like, headless, rate_config=rate_config)
         else:
-            run_random_mode(driver, base_url, cycles, enable_like, headless)
+            run_random_mode(driver, base_url, cycles, enable_like, headless, rate_config=rate_config)
 
     except KeyboardInterrupt:
         print("\n⏹️ 用户已中断")
