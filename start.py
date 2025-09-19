@@ -687,9 +687,10 @@ def scroll_and_read(driver, enable_like=False, max_scrolls=200, rate_config=None
         # Perform likes first; it may scroll elements into view
         if enable_like:
             if likes_per_scroll <= 0:
-                # Exhaust mode: keep liking until no visible unliked buttons remain
+                # Exhaust mode: like one at a time with delay between each,
+                # until no visible unliked buttons remain in current viewport.
                 while True:
-                    liked_now = like_visible_posts(driver, rate_config=rate_config, max_per_pass=50)
+                    liked_now = like_visible_posts(driver, rate_config=rate_config, max_per_pass=1)
                     total_liked += liked_now
                     if liked_now <= 0:
                         break
