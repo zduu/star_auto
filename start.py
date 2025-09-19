@@ -261,10 +261,17 @@ def setup_driver(headless=False, user_data_dir=None):
         uc_options.add_argument("--disable-dev-shm-usage")
         uc_options.add_argument("--disable-blink-features=AutomationControlled")
         uc_options.add_argument("--window-size=1920,1080")
-        if system == 'linux':
+        # Headless stability tweaks
+        if system in ('linux', 'windows'):
             uc_options.add_argument("--disable-gpu")
         if headless:
             uc_options.add_argument("--headless=new")
+            # Spoof UA in headless to avoid simplified/blocked pages
+            ua_ver = chrome_version_full or "120.0.0.0"
+            uc_options.add_argument(
+                f"--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                f"AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{ua_ver} Safari/537.36"
+            )
         if chrome_path:
             uc_options.binary_location = chrome_path
         # 持久用户数据目录（复用登录状态）
@@ -306,10 +313,23 @@ def setup_driver(headless=False, user_data_dir=None):
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--window-size=1920,1080")
-        if system == 'linux':
+        # Headless stability tweaks
+        if system in ('linux', 'windows'):
             options.add_argument("--disable-gpu")
         if headless:
             options.add_argument("--headless=new")
+            ua_ver = chrome_version_full or "120.0.0.0"
+            options.add_argument(
+                f"--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                f"AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{ua_ver} Safari/537.36"
+            )
+        # Reduce automation fingerprints for standard webdriver fallback
+        try:
+            options.add_argument("--disable-blink-features=AutomationControlled")
+            options.add_experimental_option("excludeSwitches", ["enable-automation"])
+            options.add_experimental_option('useAutomationExtension', False)
+        except Exception:
+            pass
         if chrome_path:
             options.binary_location = chrome_path
         # 持久用户数据目录（复用登录状态）
@@ -483,6 +503,8 @@ def wait_for_cloudflare(driver, headless=False, max_wait=30):
 
 def get_random_topic(driver, base_url):
     from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
 
     def is_topic_url(url: str) -> bool:
         if not url:
@@ -506,6 +528,13 @@ def get_random_topic(driver, base_url):
     ]
 
     topics = []
+    # First wait briefly for any topic link to appear
+    try:
+        WebDriverWait(driver, 8).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, ", ".join(selectors)))
+        )
+    except Exception:
+        pass
     for _ in range(3):
         for css in selectors:
             try:
@@ -525,6 +554,11 @@ def get_random_topic(driver, base_url):
         if candidates:
             return random.choice(candidates)
         topics.clear()
+        # Nudge scroll to trigger lazy rendering
+        try:
+            driver.execute_script("window.scrollBy(0, 400);")
+        except Exception:
+            pass
         time.sleep(2)
     return None
 
@@ -730,25 +764,60 @@ def scroll_and_read(driver, enable_like=False, max_scrolls=200, rate_config=None
     return total_liked
 
 
-def ensure_login(driver, base_url):
+def ensure_login(driver, base_url, headless=False):
     from selenium.webdriver.common.by import By
     try:
-        driver.get(base_url)
-        time.sleep(3)
-        # 检查是否存在明显的登录按钮
-        login_candidates = driver.find_elements(By.CSS_SELECTOR, "a[href*='login'], .login-button, button.login-button")
-        if login_candidates:
-            print("ℹ️ 检测到未登录状态，请在打开的浏览器中手动登录后返回终端。")
-            print("   登录完成后本脚本会自动继续……(最多等待5分钟)")
-            start = time.time()
-            while time.time() - start < 300:
-                time.sleep(3)
-                driver.get(base_url)
-                time.sleep(2)
-                if not driver.find_elements(By.CSS_SELECTOR, "a[href*='login'], .login-button, button.login-button"):
-                    print("✅ 已检测到登录状态")
+        def any_visible(selector: str):
+            els = driver.find_elements(By.CSS_SELECTOR, selector)
+            for el in els:
+                try:
+                    if el.is_displayed():
+                        return el
+                except Exception:
+                    continue
+            return None
+
+        def looks_logged_in() -> bool:
+            # 常见 Discourse 登录后特征（尽量减少误判）
+            checks = [
+                "#current-user",
+                ".header-dropdown-toggle.current-user",
+                "a[data-user-card][href*='/u/']",
+                ".d-header .user-menu .avatar",
+            ]
+            for css in checks:
+                if any_visible(css):
                     return True
-            print("⚠️ 登录超时，继续尝试未登录流程……")
+            return False
+
+        driver.get(base_url)
+        # 等待 Cloudflare/反爬检查通过后再判断登录态
+        wait_for_cloudflare(driver, headless=headless, max_wait=60)
+        time.sleep(2)
+
+        if looks_logged_in():
+            return True
+
+        # 仅当“可见”的登录入口存在时才判断为未登录
+        if any_visible("a[href*='login'], .login-button, button.login-button"):
+            if headless:
+                print("⚠️ 当前为无头模式且检测到未登录状态。")
+                print("   请先以有头模式运行并登录一次，或复用已有Chrome用户数据目录。")
+                print("   例如：python start.py --no-headless 或在交互中选择有头模式。")
+                return False
+            else:
+                print("ℹ️ 检测到未登录状态，请在打开的浏览器中手动登录后返回终端。")
+                print("   登录完成后本脚本会自动继续……(最多等待5分钟)")
+                start = time.time()
+                while time.time() - start < 300:
+                    time.sleep(3)
+                    driver.get(base_url)
+                    wait_for_cloudflare(driver, headless=headless, max_wait=30)
+                    time.sleep(2)
+                    if looks_logged_in() or not any_visible("a[href*='login'], .login-button, button.login-button"):
+                        print("✅ 已检测到登录状态")
+                        return True
+                print("⚠️ 登录超时，继续尝试未登录流程……")
         return True
     except Exception:
         return True
@@ -756,11 +825,48 @@ def ensure_login(driver, base_url):
 
 def run_random_mode(driver, base_url, cycles, enable_like, headless, rate_config=None):
     from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+
+    def open_topics_index():
+        candidates = [
+            base_url,
+            base_url.rstrip('/') + '/latest',
+            base_url.rstrip('/') + '/top',
+            base_url.rstrip('/') + '/categories',
+        ]
+        for url in candidates:
+            try:
+                driver.get(url)
+                wait_for_cloudflare(driver, headless=headless, max_wait=60)
+                # Wait up to ~10s for any topic list/link to appear
+                try:
+                    WebDriverWait(driver, 10).until(
+                        EC.presence_of_element_located((
+                            By.CSS_SELECTOR,
+                            "a.raw-topic-link, a.title, .topic-list-item .main-link a, tr.topic-list-item .main-link a, a[href*='/t/']"
+                        ))
+                    )
+                    return True
+                except Exception:
+                    # small scroll to wake lazy render
+                    try:
+                        driver.execute_script("window.scrollBy(0, 600);")
+                    except Exception:
+                        pass
+                    time.sleep(1.5)
+                    # One more quick check
+                    els = driver.find_elements(By.CSS_SELECTOR, "a[href*='/t/']")
+                    if els:
+                        return True
+            except Exception:
+                continue
+        return False
     for idx in range(cycles):
         print(f"➡️  循环 {idx + 1}/{cycles}")
-        driver.get(base_url)
-        wait_for_cloudflare(driver, headless=headless)
-        time.sleep(3)
+        if not open_topics_index():
+            print("⚠️ 未找到帖子列表，跳过本次循环")
+            continue
         topic = get_random_topic(driver, base_url)
         if not topic:
             print("⚠️ 未找到帖子，跳过本次循环")
@@ -1013,7 +1119,9 @@ def main():
         print(f"🔐 使用持久会话目录: {user_data_dir}")
 
         # 登录（如需要）
-        ensure_login(driver, base_url)
+        if not ensure_login(driver, base_url, headless=headless):
+            print("⏹️ 未登录且为无头模式，已安全退出。")
+            return
 
         # 跑模式
         if mode == 'direct':
