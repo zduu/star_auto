@@ -22,10 +22,12 @@ from typing import Optional
 from urllib.parse import urlparse
 
 DEFAULT_RATE_CONFIG = {
-    'scroll_delay_min': 0.6,
-    'scroll_delay_max': 1.4,
-    'like_delay_min': 1.0,
-    'like_delay_max': 2.5,
+    'scroll_delay_min': 2.6,
+    'scroll_delay_max': 4.4,
+    'like_delay_min': 2.0,
+    'like_delay_max': 3.5,
+    # 每次滚动最多点赞数量；0 表示本屏可见的全部点完再继续滚动
+    'likes_per_scroll': 0,
     'topic_delay_min': 3.0,
     'topic_delay_max': 6.0,
 }
@@ -527,10 +529,16 @@ def get_random_topic(driver, base_url):
     return None
 
 
-def like_visible_posts(driver, rate_config=None):
+def like_visible_posts(driver, rate_config=None, max_per_pass: int = 1):
     from selenium.webdriver.common.by import By
     from selenium.webdriver.support.ui import WebDriverWait
     from selenium.webdriver.support import expected_conditions as EC
+
+    # Clamp max_per_pass to a sane small integer
+    try:
+        max_per_pass = max(1, int(float(max_per_pass)))
+    except Exception:
+        max_per_pass = 1
 
     liked = 0
 
@@ -542,7 +550,15 @@ def like_visible_posts(driver, rate_config=None):
         "button[aria-label*='Like'], button[aria-label*='赞'], button[title*='Like'], button[title*='赞']",
     ]
 
+    # Collect candidate buttons from all selectors
+    candidates = []
     seen_positions = set()
+    viewport_h = 0
+    try:
+        viewport_h = int(driver.execute_script("return window.innerHeight || document.documentElement.clientHeight || 0;") or 0)
+    except Exception:
+        viewport_h = 0
+
     for css in selectors:
         try:
             buttons = driver.find_elements(By.CSS_SELECTOR, css)
@@ -550,75 +566,166 @@ def like_visible_posts(driver, rate_config=None):
             buttons = []
         for btn in buttons:
             try:
-                # Only operate on real buttons
                 tag = (btn.tag_name or '').lower()
                 if tag != 'button':
                     continue
-
-                # De-duplicate by location on screen
+                # De-duplicate by approximate page position
                 loc = btn.location or {}
                 key = (int(loc.get('x', 0)), int(loc.get('y', 0)))
                 if key in seen_positions:
                     continue
                 seen_positions.add(key)
 
-                # Skip if already liked
                 aria = (btn.get_attribute('aria-pressed') or '').lower()
                 cls = (btn.get_attribute('class') or '').lower()
                 if 'liked' in cls or 'has-like' in cls or aria == 'true':
                     continue
 
-                # Scroll into view and wait until clickable, then click via JS for reliability
+                # Check if the button is in viewport and compute distance to center
                 try:
-                    driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", btn)
+                    rect = driver.execute_script(
+                        "const r = arguments[0].getBoundingClientRect(); return [r.top, r.bottom, r.height];",
+                        btn,
+                    ) or [None, None, None]
                 except Exception:
-                    pass
-                try:
-                    WebDriverWait(driver, 3).until(EC.element_to_be_clickable(btn))
-                except Exception:
-                    pass
-                try:
-                    driver.execute_script("arguments[0].click();", btn)
-                except Exception:
-                    try:
-                        btn.click()
-                    except Exception:
+                    rect = [None, None, None]
+                top, bottom, height = rect
+                if top is None or bottom is None:
+                    continue
+                if viewport_h:
+                    if bottom <= 0 or top >= viewport_h:
+                        # Not visible this pass
                         continue
+                    center = top + (height or 0) / 2.0
+                    dist_to_center = abs(center - viewport_h / 2.0)
+                else:
+                    # Fallback when viewport size unknown: keep order
+                    dist_to_center = 1e9
 
-                # Confirm state change; some sites require a short debounce
-                ok = False
-                for _ in range(5):
-                    time.sleep(0.2)
-                    aria2 = (btn.get_attribute('aria-pressed') or '').lower()
-                    cls2 = (btn.get_attribute('class') or '').lower()
-                    if 'liked' in cls2 or 'has-like' in cls2 or aria2 == 'true':
-                        ok = True
-                        break
-                if ok:
-                    liked += 1
-                    apply_delay(rate_config, 'like')
+                candidates.append((dist_to_center, btn))
             except Exception:
                 continue
+
+    # Sort so that we like the element closest to center first
+    candidates.sort(key=lambda x: x[0])
+
+    # Act on up to max_per_pass candidates
+    for _, btn in candidates:
+        if liked >= max_per_pass:
+            break
+        try:
+            try:
+                driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", btn)
+            except Exception:
+                pass
+            try:
+                WebDriverWait(driver, 3).until(EC.element_to_be_clickable(btn))
+            except Exception:
+                pass
+            try:
+                driver.execute_script("arguments[0].click();", btn)
+            except Exception:
+                try:
+                    btn.click()
+                except Exception:
+                    continue
+
+            # Confirm state change
+            ok = False
+            for _ in range(5):
+                time.sleep(0.2)
+                aria2 = (btn.get_attribute('aria-pressed') or '').lower()
+                cls2 = (btn.get_attribute('class') or '').lower()
+                if 'liked' in cls2 or 'has-like' in cls2 or aria2 == 'true':
+                    ok = True
+                    break
+            if ok:
+                liked += 1
+                apply_delay(rate_config, 'like')
+        except Exception:
+            continue
     return liked
 
 
 def scroll_and_read(driver, enable_like=False, max_scrolls=200, rate_config=None):
-    last_height = 0
-    stable = 0
+    """Scroll through the page and optionally like visible posts.
+
+    Previous logic incorrectly used only document.body.scrollHeight changes to
+    detect progress, which breaks on long static pages (height doesn't change
+    while scrolling) and can prematurely stop. This version detects the real
+    bottom using scroll position and viewport height, and requires being at the
+    bottom for several checks before exiting. It also adapts scroll step near
+    the bottom and is robust to infinite loading pages (height growth resets
+    the bottom detection).
+    """
     total_liked = 0
+    stable_bottom = 0
+    last_total_h = None
+
+    # Determine likes per scroll pass to pace likes with scrolling.
+    # 0 means exhaust all visible likes before the next scroll.
+    likes_per_scroll = 0
+    if isinstance(rate_config, dict):
+        try:
+            likes_per_scroll = int(float(rate_config.get('likes_per_scroll', 0)))
+        except Exception:
+            likes_per_scroll = 0
+
+    def get_scroll_metrics():
+        return driver.execute_script(
+            """
+            const doc = document.documentElement;
+            const body = document.body;
+            const scrollY = window.scrollY || window.pageYOffset || doc.scrollTop || body.scrollTop || 0;
+            const innerH = window.innerHeight || doc.clientHeight || 0;
+            const scrollH = Math.max(body.scrollHeight, doc.scrollHeight);
+            return [scrollY, innerH, scrollH];
+            """
+        )
+
     for i in range(max_scrolls):
+        # Perform likes first; it may scroll elements into view
         if enable_like:
-            total_liked += like_visible_posts(driver, rate_config=rate_config)
-        driver.execute_script("window.scrollBy(0, 600);")
+            if likes_per_scroll <= 0:
+                # Exhaust mode: keep liking until no visible unliked buttons remain
+                while True:
+                    liked_now = like_visible_posts(driver, rate_config=rate_config, max_per_pass=50)
+                    total_liked += liked_now
+                    if liked_now <= 0:
+                        break
+            else:
+                total_liked += like_visible_posts(driver, rate_config=rate_config, max_per_pass=max(1, likes_per_scroll))
+
+        # Measure after likes to get accurate position
+        y, inner_h, total_h = get_scroll_metrics()
+
+        # If new content increased total height, reset bottom stability
+        if last_total_h is not None and total_h > last_total_h:
+            stable_bottom = 0
+
+        # Check if we are already at bottom; if so, avoid extra scrollBy
+        if (y + inner_h) >= (total_h - 2):
+            stable_bottom += 1
+            last_total_h = total_h
+            if stable_bottom >= 2:
+                break
+            # Give time for potential lazy-load to append more content
+            apply_delay(rate_config, 'scroll')
+            continue
+
+        # Not yet at bottom; pick step size
+        remaining = max(0, total_h - (y + inner_h))
+        step = 600 if remaining > 800 else 200
+        driver.execute_script(f"window.scrollBy(0, {step});")
+
         apply_delay(rate_config, 'scroll')
-        h = driver.execute_script("return document.body.scrollHeight")
-        if h == last_height:
-            stable += 1
-        else:
-            stable = 0
-            last_height = h
-        if stable >= 3:
-            break
+
+        # Re-measure to update trackers
+        y2, inner_h2, total_h2 = get_scroll_metrics()
+        if total_h2 > total_h:
+            stable_bottom = 0
+        last_total_h = total_h2
+
     return total_liked
 
 
@@ -780,6 +887,7 @@ def main():
             'scroll_delay_max': ask_rate('滚动最大间隔(秒)', 'scroll_delay_max'),
             'like_delay_min': ask_rate('点赞最小间隔(秒)', 'like_delay_min'),
             'like_delay_max': ask_rate('点赞最大间隔(秒)', 'like_delay_max'),
+            'likes_per_scroll': ask_rate('每次滚动最多点赞数(0=全部)', 'likes_per_scroll'),
             'topic_delay_min': ask_rate('帖子间最小停顿(秒)', 'topic_delay_min'),
             'topic_delay_max': ask_rate('帖子间最大停顿(秒)', 'topic_delay_max'),
         }
@@ -871,6 +979,11 @@ def main():
     print(f"- 点赞: {'启用' if enable_like else '禁用'}")
     print(f"- 滚动间隔: {rate_config['scroll_delay_min']:.2f}-{rate_config['scroll_delay_max']:.2f}s")
     print(f"- 点赞间隔: {rate_config['like_delay_min']:.2f}-{rate_config['like_delay_max']:.2f}s")
+    try:
+        lps = int(float(rate_config.get('likes_per_scroll', 0)))
+    except Exception:
+        lps = 0
+    print(f"- 每次滚动最多点赞: {'全部' if lps <= 0 else lps}")
     print(f"- 帖子间停顿: {rate_config['topic_delay_min']:.2f}-{rate_config['topic_delay_max']:.2f}s")
 
     # 启动浏览器（按站点使用持久用户数据目录，复用登录状态）
