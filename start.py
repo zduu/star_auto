@@ -68,7 +68,59 @@ def apply_delay(rate_config, kind):
         pass
 
 
+def find_local_chromedriver(chrome_version_major: Optional[int]) -> Optional[str]:
+    """Locate a local chromedriver without network.
+    Checks settings.json, CHROMEDRIVER env, project .drivers/, and common paths.
+    """
+    # Try settings.json in CWD
+    try:
+        cfg_path = os.path.join(os.path.abspath(os.getcwd()), 'settings.json')
+        if os.path.exists(cfg_path):
+            with open(cfg_path, 'r', encoding='utf-8') as f:
+                s = json.load(f)
+                p = (s.get('chromedriver_path') or '').strip()
+                if p and os.path.exists(p):
+                    return p
+    except Exception:
+        pass
+
+    # env override
+    env_p = os.environ.get('CHROMEDRIVER')
+    if env_p and os.path.exists(env_p):
+        return env_p
+
+    # project-local cache
+    roots = []
+    if chrome_version_major is not None:
+        roots.append(os.path.join(os.path.abspath(os.getcwd()), '.drivers', str(chrome_version_major)))
+    roots.append(os.path.join(os.path.abspath(os.getcwd()), '.drivers'))
+    candidates = []
+    for root in roots:
+        candidates.append(os.path.join(root, 'chromedriver'))
+        candidates.append(os.path.join(root, 'chromedriver.exe'))
+
+    # common system paths
+    candidates.extend([
+        '/opt/homebrew/bin/chromedriver',
+        '/usr/local/bin/chromedriver',
+        '/usr/bin/chromedriver',
+        os.path.expanduser('~/bin/chromedriver'),
+    ])
+
+    for c in candidates:
+        try:
+            if os.path.exists(c) and os.access(c, os.X_OK):
+                return c
+        except Exception:
+            continue
+    return None
+
+
 def install_matching_chromedriver(chrome_version_full: Optional[str], chrome_version_major: Optional[int]):
+    # Prefer local chromedriver first (offline)
+    local = find_local_chromedriver(chrome_version_major)
+    if local:
+        return local
     try:
         from webdriver_manager.chrome import ChromeDriverManager
     except Exception as exc:
@@ -166,6 +218,12 @@ def get_chrome_executable_path():
         candidates = [
             "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
             os.path.expanduser("~/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+            "/Applications/Google Chrome Beta.app/Contents/MacOS/Google Chrome Beta",
+            os.path.expanduser("~/Applications/Google Chrome Beta.app/Contents/MacOS/Google Chrome Beta"),
+            "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
+            os.path.expanduser("~/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary"),
+            "/Applications/Chromium.app/Contents/MacOS/Chromium",
+            os.path.expanduser("~/Applications/Chromium.app/Contents/MacOS/Chromium"),
         ]
     else:
         candidates = [
@@ -214,15 +272,24 @@ def setup_driver(headless=False, user_data_dir=None):
             uc_options.add_argument("--no-first-run")
             uc_options.add_argument("--no-default-browser-check")
 
+        # Attempt to use local chromedriver if available (offline)
+        local_driver_path = find_local_chromedriver(chrome_version_major)
+        uc_use_subprocess = (system == 'darwin')
         driver = uc.Chrome(
             options=uc_options,
             # Pin to detected major version if available to avoid mismatch
             version_main=chrome_version_major,
-            driver_executable_path=None,
+            driver_executable_path=local_driver_path,
             browser_executable_path=chrome_path if chrome_path else None,
-            use_subprocess=False,
+            use_subprocess=uc_use_subprocess,
             log_level=3,
         )
+        if chrome_path:
+            print(f"🧭 Chrome 二进制: {chrome_path}")
+        if chrome_version_full:
+            print(f"🧭 Chrome 版本: {chrome_version_full}")
+        if local_driver_path:
+            print(f"🧭 使用本地 chromedriver: {local_driver_path}")
         return driver
     except Exception as e:
         print(f"⚠️ undetected_chromedriver 启动失败: {e}")
@@ -251,12 +318,17 @@ def setup_driver(headless=False, user_data_dir=None):
             options.add_argument("--no-default-browser-check")
 
         # If we detected local Chrome version, request matching driver version
-        driver_path = install_matching_chromedriver(chrome_version_full, chrome_version_major)
+        driver_path = find_local_chromedriver(chrome_version_major) or install_matching_chromedriver(chrome_version_full, chrome_version_major)
         service = Service(driver_path)
         driver = webdriver.Chrome(service=service, options=options)
         return driver
     except Exception as e:
         print(f"❌ 标准 webdriver 也启动失败: {e}")
+        if 'Could not reach host' in str(e) or 'EOF' in str(e):
+            print("💡 提示: 当前网络不可下载chromedriver；可选择如下任一离线方式：")
+            print("   1) 将匹配主版本的chromedriver放到 .drivers/<主版本>/chromedriver")
+            print("   2) 安装到 /opt/homebrew/bin 或 /usr/local/bin")
+            print("   3) 运行配置向导填写绝对路径：python start.py --configure")
         print("👉 请先运行: python fix_startup_issue.py 进行故障排查")
         raise
 
@@ -695,6 +767,8 @@ def main():
             cyc = cycles_def
         head = ask('默认无头模式? (y/n)', 'n').lower() in ['y', 'yes']
         like = ask('默认启用点赞? (y/n)', 'y').lower() not in ['n', 'no']
+        # 可选：指定本地chromedriver路径，适合离线/公司网络
+        chromedriver_path = ask('指定chromedriver绝对路径(留空自动)', (current.get('chromedriver_path') or ''))
         rate_current = normalize_rate_config(current.get('rate_control'))
 
         def ask_rate(prompt, key):
@@ -716,6 +790,7 @@ def main():
             'default_headless': bool(head),
             'default_like': bool(like),
             'rate_control': rate_control,
+            'chromedriver_path': chromedriver_path or '',
         }
         save_settings(settings)
 

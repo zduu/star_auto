@@ -68,6 +68,12 @@ def get_chrome_executable_path() -> Optional[str]:
         candidates = [
             "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
             os.path.expanduser("~/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+            "/Applications/Google Chrome Beta.app/Contents/MacOS/Google Chrome Beta",
+            os.path.expanduser("~/Applications/Google Chrome Beta.app/Contents/MacOS/Google Chrome Beta"),
+            "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
+            os.path.expanduser("~/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary"),
+            "/Applications/Chromium.app/Contents/MacOS/Chromium",
+            os.path.expanduser("~/Applications/Chromium.app/Contents/MacOS/Chromium"),
         ]
     else:
         candidates = [
@@ -84,6 +90,10 @@ def get_chrome_executable_path() -> Optional[str]:
 
 
 def install_matching_chromedriver(chrome_version_full: Optional[str], chrome_version_major: Optional[int]) -> str:
+    # Prefer local chromedriver first (offline)
+    local = find_local_chromedriver(chrome_version_major)
+    if local:
+        return local
     try:
         from webdriver_manager.chrome import ChromeDriverManager
     except Exception as exc:
@@ -116,6 +126,46 @@ def install_matching_chromedriver(chrome_version_full: Optional[str], chrome_ver
     if last_error:
         raise last_error
     raise RuntimeError("无法自动安装匹配的 ChromeDriver")
+
+
+def find_local_chromedriver(chrome_version_major: Optional[int]) -> Optional[str]:
+    # settings.json in CWD
+    try:
+        cfg_path = os.path.join(os.path.abspath(os.getcwd()), 'settings.json')
+        if os.path.exists(cfg_path):
+            import json as _json
+            with open(cfg_path, 'r', encoding='utf-8') as f:
+                s = _json.load(f)
+                p = (s.get('chromedriver_path') or '').strip()
+                if p and os.path.exists(p):
+                    return p
+    except Exception:
+        pass
+    # env override
+    env_p = os.environ.get('CHROMEDRIVER')
+    if env_p and os.path.exists(env_p):
+        return env_p
+    roots = []
+    if chrome_version_major is not None:
+        roots.append(os.path.join(os.path.abspath(os.getcwd()), '.drivers', str(chrome_version_major)))
+    roots.append(os.path.join(os.path.abspath(os.getcwd()), '.drivers'))
+    candidates = []
+    for root in roots:
+        candidates.append(os.path.join(root, 'chromedriver'))
+        candidates.append(os.path.join(root, 'chromedriver.exe'))
+    candidates.extend([
+        '/opt/homebrew/bin/chromedriver',
+        '/usr/local/bin/chromedriver',
+        '/usr/bin/chromedriver',
+        os.path.expanduser('~/bin/chromedriver'),
+    ])
+    for c in candidates:
+        try:
+            if os.path.exists(c) and os.access(c, os.X_OK):
+                return c
+        except Exception:
+            continue
+    return None
 
 def cleanup_undetected_chromedriver():
     """清理undetected_chromedriver缓存"""
@@ -279,11 +329,11 @@ def test_simple_chrome():
                 print("正在创建Chrome实例...")
                 driver = uc.Chrome(
                     options=options,
-                    use_subprocess=False,
+                    use_subprocess=(system == 'darwin'),
                     log_level=3,
                     version_main=chrome_version_major,
                     browser_executable_path=chrome_path if chrome_path else None,
-                    driver_executable_path=None
+                    driver_executable_path=find_local_chromedriver(chrome_version_major)
                 )
                 result_queue.put(('success', driver))
             except Exception as e:
@@ -365,7 +415,8 @@ def test_standard_chrome():
         except Exception:
             chrome_version_major = None
 
-        driver_path = install_matching_chromedriver(chrome_version_full, chrome_version_major)
+        local = find_local_chromedriver(chrome_version_major)
+        driver_path = local or install_matching_chromedriver(chrome_version_full, chrome_version_major)
         service = Service(driver_path)
         driver = webdriver.Chrome(service=service, options=options)
 
@@ -381,6 +432,8 @@ def test_standard_chrome():
 
     except Exception as e:
         print(f"❌ 标准webdriver也失败: {e}")
+        if 'Could not reach host' in str(e) or 'EOF' in str(e):
+            print("💡 提示: 当前网络不可下载chromedriver；可将匹配主版本的驱动放到 .drivers/<主版本>/chromedriver，或在 settings.json 中配置 chromedriver_path。")
         return False
 
 def main():
